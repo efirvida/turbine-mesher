@@ -259,15 +259,7 @@ class Mesh:
         # Convertir las listas de celdas en formato `meshio`
         mesh_cells = [(key, np.array(value)) for key, value in cells.items() if value]
         self.mesh = meshio.Mesh(points=nodes, cells=mesh_cells)
-
-        nodes_dim_tags = [[0, n] for n in range(nodes.shape[0])]
-        # elements_dim_tags = [[2, e] for e in range(elements.max())]
-        dim_tags = {"gmsh:dim_tags": nodes_dim_tags}
-
-        cell_data = {"gmsh:geometrical": [(2, i) for i in range(len(elements))]}
-
-        self.mesh.point_data = dim_tags
-        self.mesh.cell_data = cell_data
+        self.mesh = self.convert_hex_to_wedge()
 
     def to_gmsh(self):
         mesh = deepcopy(self.pynumad_solid_mesh)
@@ -279,9 +271,10 @@ class Mesh:
         mesh_str.extend([f"{i} {n[0]} {n[1]} {n[2]}" for i, n in enumerate(nodes)])
         mesh_str.append("$EndNodes")
 
-        mesh_str.append("$Elements")
-        mesh_str.append(f"{elements.shape[0]}")
-        for el_id, element in enumerate(elements):
+        mesh_str.append("$Elementsde")
+        mesh_str.append(f"{elements.shape[0] + nodes.shape[0]}")
+        mesh_str.extend([f"{i} 15 2 0 {i} {i}" for i in range(nodes.shape[0])])
+        for el_id, element in enumerate(elements, start=nodes.shape[0]):
             if len(element) == 8 and element[6] != -1:  # Hexahedron (C3D8I)
                 el_type = 5
             elif len(element) == 8 and element[6] == -1:  # Wedge (C3D6)
@@ -289,12 +282,56 @@ class Mesh:
 
             nodes = " ".join(str(el) for el in element if el != -1)
 
-            mesh_str.append(f"{el_id} {el_type} 0 {nodes}")
+            mesh_str.append(f"{el_id} {el_type} 2 99 3 {nodes}")
 
         mesh_str.append("$EndElements")
+        mesh_str.append("$PhysicalNames")
+        mesh_str.append("1")
+        mesh_str.append('1 99 "Volume"')
+        mesh_str.append("$End$PhysicalNames")
 
-        with open("gmsh.msh", "w") as f:
+        with open("blade.msh", "w") as f:
             f.write("\n".join(mesh_str))
+
+    def convert_hex_to_wedge(self):
+        """
+        Convierte todos los elementos hexaédricos a elementos cuña (wedge) en un objeto de malla de Meshio.
+
+        Parámetros:
+        - mesh: Objeto de malla de meshio
+
+        Retorna:
+        - new_mesh: Objeto de malla de meshio con los elementos convertidos a cuña
+        """
+
+        mesh = deepcopy(self.mesh)  # Copiar la malla original para evitar modificarla directamente
+        wedges = []
+
+        # Primero, agregar los elementos tipo wedge que ya existen en la malla
+        for cell_block in mesh.cells:
+            if cell_block.type == "wedge":
+                wedges.extend(cell_block.data)  # Añadir los elementos de tipo wedge existentes
+
+        # Ahora convertir los hexaedros en wedges
+        for cell_block in mesh.cells:
+            if cell_block.type == "hexahedron":
+                for hex_element in cell_block.data:
+                    node0, node1, node2, node3, node4, node5, node6, node7 = hex_element
+
+                    # Crear cuña 1 (dividiendo el hexaedro)
+                    wedges.append(
+                        np.array([node0, node1, node2, node4, node5, node6])
+                    )  # Primera cuña
+
+                    # Crear cuña 2 (dividiendo el hexaedro)
+                    wedges.append(
+                        np.array([node0, node2, node3, node4, node6, node7])
+                    )  # Segunda cuña
+
+        # Crear una nueva malla con los elementos convertidos a cuñas (wedge)
+        new_mesh = meshio.Mesh(points=mesh.points, cells=[("wedge", np.array(wedges))])
+
+        return new_mesh
 
     def __str__(self):
         # Inicializar una lista para almacenar las líneas del reporte
