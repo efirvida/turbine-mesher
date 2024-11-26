@@ -1,14 +1,24 @@
 import os
+from contextlib import redirect_stdout
 from copy import deepcopy
-from typing import Dict, Tuple
+from io import StringIO
+from typing import Dict, Tuple, Union
 
 import meshio
 import numpy as np
 import pynumad as pynu
 import trimesh
+import yaml
 from pynumad.mesh_gen.mesh_gen import shell_mesh_general, solidMeshFromShell
+from rich.console import Console
+from rich.panel import Panel
+from rich.progress import track
+from rich.text import Text
 
-from turbine_mesher.io.yaml import read_hub_data
+from turbine_mesher.models import Hub
+from turbine_mesher.types import *
+
+import pyvista as pv
 
 
 class Mesh:
@@ -18,10 +28,12 @@ class Mesh:
         element_size: float = 0.5,
         n_samples: int = 300,
     ):
+        self.console = Console()
+
         self._yaml = numad_yaml
         self._blade = pynu.Blade()
         self._blade.read_yaml(numad_yaml)
-        self._hub = read_hub_data(numad_yaml)
+        self._hub = self.__read_hub_data(numad_yaml)
 
         self._mesh_element_size = element_size
         self._layer_num_els = (1, 1, 1)
@@ -38,56 +50,68 @@ class Mesh:
         self._blade.expand_blade_geometry_te(minTELengths)
 
     def shell_mesh(self):
-        print("#######################")
-        print("# Creating Shell Mesh #")
-        print("#######################")
-        mesh = shell_mesh_general(self._blade, False, False, self._mesh_element_size)
-        print("Meshing Done!")
-        print("#######################")
+        # Mostrar un panel inicial indicando que se está creando la malla
+        with self.console.status("[bold blue]Creating Shell Mesh...") as status:
+            with StringIO() as buf, redirect_stdout(buf):
+                mesh = shell_mesh_general(self._blade, False, False, self._mesh_element_size)
 
-        self.blade_root_nodes = np.array([
-            mesh["nodes"][node] for node in mesh["sets"]["node"][0]["labels"]
-        ])
+            # Recopilar nodos de la raíz de la cuchilla
+            self.blade_root_nodes = np.array([
+                mesh["nodes"][node] for node in mesh["sets"]["node"][0]["labels"]
+            ])
+            # Filtrar elementos de la superficie
+            surface_elements_ids = [
+                label
+                for element in mesh["sets"]["element"]
+                if "w" not in element["name"].lower()
+                for label in element["labels"]
+            ]
 
-        surface_elements_ids = [
-            label
-            for element in mesh["sets"]["element"]
-            if "w" not in element["name"].lower()
-            for label in element["labels"]
-        ]
+            # Recopilar los nodos de la superficie
+            surface_elements = [mesh["elements"][el] for el in surface_elements_ids]
+            self.surface_nodes = {
+                int(node): mesh["nodes"][node]
+                for node in np.array(surface_elements).flatten()
+                if node != -1
+            }
 
-        surface_elements = [mesh["elements"][el] for el in surface_elements_ids]
-        self.surface_nodes = {
-            int(node): mesh["nodes"][node]
-            for node in np.array(surface_elements).flatten()
-            if node != -1
-        }
-        print("Meshing Done!")
-        print("#######################")
-        self.pynumad_shell_mesh = mesh
-        self.has_shell_mesh = True
-        self.has_solid_mesh = False
-        self._pynumad_to_meshio(self.pynumad_shell_mesh)
+            # Actualizar estado interno
+            self.pynumad_shell_mesh = mesh
+            self.has_shell_mesh = True
+            self.has_solid_mesh = False
+
+            # Exportar malla a MeshIO
+            self._pynumad_to_meshio(self.pynumad_shell_mesh)
+
+            self.console.print(self)
 
     def solid_mesh(self):
-        print("#######################")
-        print("# Creating Solid Mesh #")
-        print("#######################")
-        self._blade.stackdb.edit_stacks_for_solid_mesh()
-        shell_mesh = shell_mesh_general(self._blade, True, True, self._mesh_element_size)
-        print("finished shell mesh")
-        mesh = solidMeshFromShell(
-            self._blade, shell_mesh, self._layer_num_els, self._mesh_element_size
-        )
-        print("Meshing Done!")
-        print("#######################")
+        # Mostrar panel inicial indicando que se está creando la malla
+        with self.console.status("[bold blue]Creating Solid Mesh...", spinner="dots") as status:
+            # Editar los stacks necesarios para la malla sólida
+            self._blade.stackdb.edit_stacks_for_solid_mesh()
 
-        self.blade_root_nodes = [mesh["nodes"][node] for node in mesh["sets"]["node"][0]["labels"]]
-        self.pynumad_solid_mesh = mesh
-        self.has_shell_mesh = False
-        self.has_solid_mesh = True
+            # Suprimir la salida estándar para funciones que imprimen directamente
+            with StringIO() as buf, redirect_stdout(buf):
+                shell_mesh = shell_mesh_general(self._blade, True, True, self._mesh_element_size)
+                mesh = solidMeshFromShell(
+                    self._blade, shell_mesh, self._layer_num_els, self._mesh_element_size
+                )
 
-        self._pynumad_to_meshio(self.pynumad_solid_mesh)
+            # Recopilar nodos de la raíz de la cuchilla
+            self.blade_root_nodes = [
+                mesh["nodes"][node] for node in mesh["sets"]["node"][0]["labels"]
+            ]
+
+            # Actualizar el estado de la malla
+            self.pynumad_solid_mesh = mesh
+            self.has_shell_mesh = False
+            self.has_solid_mesh = True
+
+            # Exportar a MeshIO
+            self._pynumad_to_meshio(self.pynumad_solid_mesh)
+
+            self.console.print(self)
 
     def mesh_rotor(self, n_blades: int = 3):
         """
@@ -259,7 +283,7 @@ class Mesh:
         # Convertir las listas de celdas en formato `meshio`
         mesh_cells = [(key, np.array(value)) for key, value in cells.items() if value]
         self.mesh = meshio.Mesh(points=nodes, cells=mesh_cells)
-        self.mesh = self.convert_hex_to_wedge()
+        self.mesh = self.tetrahelize()
 
     def to_gmsh(self):
         mesh = deepcopy(self.pynumad_solid_mesh)
@@ -333,16 +357,66 @@ class Mesh:
 
         return new_mesh
 
+    def tetrahelize(self):
+        """
+        Convierte todos los elementos hexaédricos y cuña (wedge) a elementos tetraédricos en un objeto de malla de Meshio.
+
+        Parámetros:
+        - mesh: Objeto de malla de meshio
+
+        Retorna:
+        - new_mesh: Objeto de malla de meshio con los elementos convertidos a tetraedros
+        """
+
+        mesh = deepcopy(self.mesh)  # Copiar la malla original para evitar modificarla directamente
+        tetrahedra = []
+
+        def wedge_to_tetra(wedge):
+            n0, n1, n2, n3, n4, n5 = wedge
+            return [[n0, n1, n2, n4], [n2, n3, n4, n5]]
+
+        for cell_block in mesh.cells:
+            if cell_block.type == "tetra":
+                tetrahedra.extend(cell_block.data)
+
+        for cell_block in mesh.cells:
+            if cell_block.type == "hexahedron":
+                for hex_element in cell_block.data:
+                    node0, node1, node2, node3, node4, node5, node6, node7 = hex_element
+                    tetrahedra.extend(wedge_to_tetra([node0, node1, node2, node4, node5, node6]))
+                    tetrahedra.extend(wedge_to_tetra([node0, node2, node3, node4, node6, node7]))
+
+            elif cell_block.type == "wedge":
+                for wedge_element in cell_block.data:
+                    tetrahedra.extend(wedge_to_tetra(wedge_element))
+
+        new_mesh = meshio.Mesh(points=mesh.points, cells=[("tetra", np.array(tetrahedra))])
+
+        return new_mesh
+
+    @staticmethod
+    def __read_hub_data(yaml_file):
+        with open(yaml_file) as blade_yaml:
+            # data = yaml.load(blade_yaml,Loader=yaml.FullLoader)
+            data = yaml.load(blade_yaml, Loader=yaml.Loader)
+
+        # obtain hub outer shape bem
+        try:
+            return Hub(data["components"]["hub"]["outer_shape_bem"])
+        except KeyError:
+            # older versions of wind ontology do not have 'outer_shape_bem' subsection for hub data
+            return Hub(data["components"]["hub"])
+
     def __str__(self):
-        # Inicializar una lista para almacenar las líneas del reporte
-        report = ["Mesh statistics:"]
+        # Crear un objeto Text para el reporte formateado
+        report = Text("Mesh statistics:", style="bold underline blue")
 
         # Agregar el número total de puntos
-        report.append(f"Total nodes: {self.mesh.points.shape[0]}")
+        report.append(f"\nTotal nodes: {self.mesh.points.shape[0]}\n", style="bold cyan")
 
         # Calcular y agregar el número total de celdas
         total_cells = sum(cell.data.shape[0] for cell in self.mesh.cells)
-        report.append(f"Total cells: {total_cells}")
+        report.append(f"Total cells: {total_cells}\n", style="bold green")
 
         # Calcular y agregar los tipos de celdas y sus conteos
         cell_info = {t.type: 0 for t in self.mesh.cells}
@@ -350,11 +424,14 @@ class Mesh:
             amount = cell_info[cell.type] + cell.data.shape[0]
             cell_info.update({cell.type: amount})
 
-        report.append(f"Cell types: {', '.join(cell_info.keys())}")
-        report.extend([f" -> {type}: {number} Cells" for type, number in cell_info.items()])
+        report.append(f"Cell types: {', '.join(cell_info.keys())}\n", style="bold magenta")
 
-        # Unir las líneas del reporte y devolverlo como una cadena
-        return "\n".join(report)
+        # Agregar información de cada tipo de celda
+        for type, number in cell_info.items():
+            report.append(f" -> {type}: {number} Cells\n", style="bold yellow")
+
+        # Devolver la cadena formateada
+        return str(report)
 
 
 def solid_mesh(blade, elementSize: float, layerNumEls: Tuple[int, int, int] = (1, 1, 1)):
@@ -621,3 +698,28 @@ def mesh_rotor(blade_mesh, n_blade, hub_radius):
     rotor_mesh = meshio.Mesh(total_points, total_cells)
 
     return rotor_mesh
+
+
+def write_mesh(mesh_obj: Union[PyNuMADMesh, MeshIOMesh], file_name: str):
+    """
+    Writes a solid mesh to a file, creating directories if needed.
+
+    :param mesh_obj: Mesh object (MeshIO or PyNuMAD).
+    :param file_name: File name to write the mesh.
+    """
+    # Ensure the directory exists
+    os.makedirs(os.path.dirname(file_name), exist_ok=True)
+
+    # Convert to meshio.Mesh if input is a PyNuMAD dictionary
+    if isinstance(mesh_obj, dict):
+        mesh = pynumad_to_meshio(mesh_obj)
+    else:
+        mesh = mesh_obj
+
+    # Determine if remeshing is needed based on file extension
+    file_extension = file_name.lower().split(".")[-1]
+    if file_extension in {"stl", "obj"}:
+        mesh = remesh_with_trimesh(mesh)
+
+    # Write using meshio for other formats
+    meshio.write(file_name, mesh)

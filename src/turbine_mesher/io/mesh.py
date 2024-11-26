@@ -1,10 +1,10 @@
 import os
 from typing import Union, Dict
-import turbine_mesher.mesh as mesh
-from ..mesh import pynumad_to_meshio, remesh_with_trimesh
-import trimesh
+
+from turbine_mesher.mesh import pynumad_to_meshio, remesh_with_trimesh
+
 import meshio
-from ..types import MeshIOMesh, PyNuMADMesh
+from turbine_mesher.types import MeshIOMesh, PyNuMADMesh
 
 
 def write_mesh(mesh_obj: Union[PyNuMADMesh, MeshIOMesh], file_name: str):

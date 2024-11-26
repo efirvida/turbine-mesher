@@ -2,7 +2,7 @@ import numpy as np
 import os
 import pyvista as pv
 
-from turbine_mesher.mesh import mesh_rotor, shell_mesh, mesh_statistics, solid_mesh
+from turbine_mesher.turbine_mesher.mesh import mesh_rotor, shell_mesh, mesh_statistics, solid_mesh
 from turbine_mesher.io.yaml import read_hub_data
 from turbine_mesher.io.mesh import write_mesh
 from pynumad.mesh_gen.mesh_tools import *
@@ -89,7 +89,7 @@ bladeYaml = os.path.join(DATA_FOLDER, "blade.yaml")
 
 # plt.show()
 
-from turbine_mesher.mesh import Mesh
+from turbine_mesher.turbine_mesher.mesh import Mesh
 
 mesh = Mesh(bladeYaml, 0.5)
 # mesh.shell_mesh()
