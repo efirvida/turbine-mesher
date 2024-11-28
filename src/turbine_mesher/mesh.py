@@ -50,56 +50,49 @@ class Mesh:
         self._blade.expand_blade_geometry_te(minTELengths)
 
     def shell_mesh(self):
-        # Mostrar un panel inicial indicando que se está creando la malla
-        with self.console.status("[bold blue]Creating Shell Mesh...") as status:
-            with StringIO() as buf, redirect_stdout(buf):
-                mesh = shell_mesh_general(
-                    self._blade, False, False, self._mesh_element_size
-                )
+        with self.console.status("[bold blue] Creating PyNuMAD Shell Mesh...", spinner="dots"):
+            mesh = shell_mesh_general(self._blade, False, False, self._mesh_element_size)
 
-            # Recopilar nodos de la raíz de la cuchilla
-            self.blade_root_nodes = np.array(
-                [mesh["nodes"][node] for node in mesh["sets"]["node"][0]["labels"]]
-            )
-            # Filtrar elementos de la superficie
-            surface_elements_ids = [
-                label
-                for element in mesh["sets"]["element"]
-                if "w" not in element["name"].lower()
-                for label in element["labels"]
-            ]
+        self.blade_root_nodes = np.array([
+            mesh["nodes"][node] for node in mesh["sets"]["node"][0]["labels"]
+        ])
 
-            # Recopilar los nodos de la superficie
-            surface_elements = [mesh["elements"][el] for el in surface_elements_ids]
-            self.surface_nodes = {
-                int(node): mesh["nodes"][node]
-                for node in np.array(surface_elements).flatten()
-                if node != -1
-            }
+        surface_elements_ids = [
+            label
+            for element in mesh["sets"]["element"]
+            if "w" not in element["name"].lower()
+            for label in element["labels"]
+        ]
 
-            # Actualizar estado interno
-            self.pynumad_shell_mesh = mesh
-            self.has_shell_mesh = True
-            self.has_solid_mesh = False
+        surface_elements = [mesh["elements"][el] for el in surface_elements_ids]
+        self.blade_surface_nodes = {
+            int(node): mesh["nodes"][node]
+            for node in np.array(surface_elements).flatten()
+            if node != -1
+        }
 
-            # Exportar malla a MeshIO
+        # Actualizar estado interno
+        self.pynumad_shell_mesh = mesh
+        self.has_shell_mesh = True
+        self.has_solid_mesh = False
+
+        with self.console.status("[bold blue] Transform mesh into MeshIO mesh...", spinner="dots"):
             self._pynumad_to_meshio(self.pynumad_shell_mesh)
 
-            self.console.print(self)
+        with self.console.status("[bold blue] Triangulating mesh...", spinner="dots"):
+            self.mesh = self.__triangulate()
+        self.show_statistics()
+        self.console.print("Shell mesh done", style="bold white on blue")
 
     def solid_mesh(self):
         # Mostrar panel inicial indicando que se está creando la malla
-        with self.console.status(
-            "[bold blue]Creating Solid Mesh...", spinner="dots"
-        ) as status:
+        with self.console.status("[bold blue]Creating Solid Mesh...", spinner="dots") as status:
             # Editar los stacks necesarios para la malla sólida
             self._blade.stackdb.edit_stacks_for_solid_mesh()
 
             # Suprimir la salida estándar para funciones que imprimen directamente
             with StringIO() as buf, redirect_stdout(buf):
-                shell_mesh = shell_mesh_general(
-                    self._blade, True, True, self._mesh_element_size
-                )
+                shell_mesh = shell_mesh_general(self._blade, True, True, self._mesh_element_size)
                 mesh = solidMeshFromShell(
                     self._blade,
                     shell_mesh,
@@ -119,7 +112,8 @@ class Mesh:
 
             # Exportar a MeshIO
             self._pynumad_to_meshio(self.pynumad_solid_mesh)
-
+            self.mesh = self.__convert_hex_to_wedge()
+            self.mesh = self.__tetrahelize()
             self.console.print(self)
 
     def mesh_rotor(self, n_blades: int = 3):
@@ -198,47 +192,41 @@ class Mesh:
         # Handle hexahedrons (C3D8) - Generate triangular faces
         for cell in cells.get("hexahedron", []):
             hex_nodes = cell
-            faces.extend(
-                [
-                    [hex_nodes[0], hex_nodes[1], hex_nodes[2]],
-                    [hex_nodes[0], hex_nodes[2], hex_nodes[3]],
-                    [hex_nodes[0], hex_nodes[3], hex_nodes[7]],
-                    [hex_nodes[0], hex_nodes[7], hex_nodes[4]],
-                    [hex_nodes[4], hex_nodes[5], hex_nodes[6]],
-                    [hex_nodes[4], hex_nodes[6], hex_nodes[7]],
-                    [hex_nodes[2], hex_nodes[3], hex_nodes[6]],
-                    [hex_nodes[3], hex_nodes[7], hex_nodes[6]],
-                    [hex_nodes[1], hex_nodes[2], hex_nodes[5]],
-                    [hex_nodes[2], hex_nodes[6], hex_nodes[5]],
-                    [hex_nodes[1], hex_nodes[5], hex_nodes[4]],
-                    [hex_nodes[1], hex_nodes[4], hex_nodes[0]],
-                ]
-            )
+            faces.extend([
+                [hex_nodes[0], hex_nodes[1], hex_nodes[2]],
+                [hex_nodes[0], hex_nodes[2], hex_nodes[3]],
+                [hex_nodes[0], hex_nodes[3], hex_nodes[7]],
+                [hex_nodes[0], hex_nodes[7], hex_nodes[4]],
+                [hex_nodes[4], hex_nodes[5], hex_nodes[6]],
+                [hex_nodes[4], hex_nodes[6], hex_nodes[7]],
+                [hex_nodes[2], hex_nodes[3], hex_nodes[6]],
+                [hex_nodes[3], hex_nodes[7], hex_nodes[6]],
+                [hex_nodes[1], hex_nodes[2], hex_nodes[5]],
+                [hex_nodes[2], hex_nodes[6], hex_nodes[5]],
+                [hex_nodes[1], hex_nodes[5], hex_nodes[4]],
+                [hex_nodes[1], hex_nodes[4], hex_nodes[0]],
+            ])
 
         # Handle wedges (C3D6) - Generate triangular faces
         for cell in cells.get("wedge", []):
             wedge_nodes = cell
-            faces.extend(
-                [
-                    [wedge_nodes[0], wedge_nodes[1], wedge_nodes[2]],
-                    [wedge_nodes[0], wedge_nodes[2], wedge_nodes[3]],
-                    [wedge_nodes[0], wedge_nodes[3], wedge_nodes[4]],
-                    [wedge_nodes[0], wedge_nodes[4], wedge_nodes[5]],
-                    [wedge_nodes[1], wedge_nodes[2], wedge_nodes[3]],
-                    [wedge_nodes[1], wedge_nodes[3], wedge_nodes[4]],
-                    [wedge_nodes[1], wedge_nodes[4], wedge_nodes[5]],
-                ]
-            )
+            faces.extend([
+                [wedge_nodes[0], wedge_nodes[1], wedge_nodes[2]],
+                [wedge_nodes[0], wedge_nodes[2], wedge_nodes[3]],
+                [wedge_nodes[0], wedge_nodes[3], wedge_nodes[4]],
+                [wedge_nodes[0], wedge_nodes[4], wedge_nodes[5]],
+                [wedge_nodes[1], wedge_nodes[2], wedge_nodes[3]],
+                [wedge_nodes[1], wedge_nodes[3], wedge_nodes[4]],
+                [wedge_nodes[1], wedge_nodes[4], wedge_nodes[5]],
+            ])
 
         # Handle shell quads - Split quads into two triangles
         for cell in cells.get("quad", []):
             quad_nodes = cell
-            faces.extend(
-                [
-                    [quad_nodes[0], quad_nodes[1], quad_nodes[2]],
-                    [quad_nodes[0], quad_nodes[2], quad_nodes[3]],
-                ]
-            )
+            faces.extend([
+                [quad_nodes[0], quad_nodes[1], quad_nodes[2]],
+                [quad_nodes[0], quad_nodes[2], quad_nodes[3]],
+            ])
 
         # Handle shell triangles - Use directly as faces
         for cell in cells.get("triangle", []):
@@ -300,8 +288,6 @@ class Mesh:
         mesh_cells = [(key, np.array(value)) for key, value in cells.items() if value]
         self.mesh = meshio.Mesh(points=nodes, cells=mesh_cells)
         # self.mesh = self.__reorient_hexa_elements()
-        self.mesh = self.__convert_hex_to_wedge()
-        self.mesh = self.__tetrahelize()
 
     def to_gmsh(self):
         mesh = deepcopy(self.pynumad_solid_mesh)
@@ -348,9 +334,7 @@ class Mesh:
             if cell_block.type == "hexahedron":
                 for element in cell_block.data:
                     node0, node1, node2, node3, node4, node5, node6, node7 = element
-                    hexa.append(
-                        [node0, node1, node3, node2, node4, node5, node7, node6]
-                    )
+                    hexa.append([node0, node1, node3, node2, node4, node5, node7, node6])
 
         new_mesh = meshio.Mesh(
             points=mesh.points,
@@ -376,7 +360,6 @@ class Mesh:
 
                     wedges.append(np.array([node1, node3, node2, node5, node7, node6]))
 
-        # Crear una nueva malla con los elementos convertidos a cuñas (wedge)
         new_mesh = meshio.Mesh(points=mesh.points, cells=[("wedge", np.array(wedges))])
 
         return new_mesh
@@ -398,9 +381,24 @@ class Mesh:
                 for wedge_element in cell_block.data:
                     tetrahedra.extend(wedge_to_tetra(wedge_element))
 
-        new_mesh = meshio.Mesh(
-            points=mesh.points, cells=[("tetra", np.array(tetrahedra))]
-        )
+        new_mesh = meshio.Mesh(points=mesh.points, cells=[("tetra", np.array(tetrahedra))])
+
+        return new_mesh
+
+    def __triangulate(self):
+        mesh = deepcopy(self.mesh)
+        triangles = []
+        for cell_block in mesh.cells:
+            if cell_block.type == "triangle":
+                triangles.extend(cell_block.data)
+
+        for cell_block in mesh.cells:
+            if cell_block.type == "quad":
+                for element in cell_block.data:
+                    node0, node1, node2, node3 = element
+                    triangles.extend([[node0, node1, node2], [node0, node2, node3]])
+
+        new_mesh = meshio.Mesh(points=mesh.points, cells=[("triangle", np.array(triangles))])
 
         return new_mesh
 
@@ -417,33 +415,34 @@ class Mesh:
             # older versions of wind ontology do not have 'outer_shape_bem' subsection for hub data
             return Hub(data["components"]["hub"])
 
-    def __str__(self):
-        report = Text("Mesh statistics:", style="bold underline blue")
-        report.append(
-            f"\nTotal nodes: {self.mesh.points.shape[0]}\n", style="bold cyan"
-        )
+    def show_statistics(self):
+        # Crear el encabezado con estilo
+        report = [Text("Mesh statistics:", style="bold underline magenta")]
 
+        # Agregar información sobre los nodos
+        report.append(Text(f"\nTotal nodes: {self.mesh.points.shape[0]}\n", style="bold cyan"))
+
+        # Calcular y agregar información sobre las celdas totales
         total_cells = sum(cell.data.shape[0] for cell in self.mesh.cells)
-        report.append(f"Total cells: {total_cells}\n", style="bold green")
+        report.append(Text(f"Total cells: {total_cells}\n", style="bold green"))
 
+        # Inicializar y calcular el conteo de tipos de celdas
         cell_info = {t.type: 0 for t in self.mesh.cells}
         for cell in self.mesh.cells:
-            amount = cell_info[cell.type] + cell.data.shape[0]
-            cell_info.update({cell.type: amount})
+            cell_info[cell.type] += cell.data.shape[0]
 
-        report.append(
-            f"Cell types: {', '.join(cell_info.keys())}\n", style="bold magenta"
-        )
+        # Agregar tipos de celdas
+        report.append(Text(f"Cell types: {', '.join(cell_info.keys())}\n", style="bold magenta"))
 
-        for type, number in cell_info.items():
-            report.append(f" -> {type}: {number} Cells\n", style="bold yellow")
+        # Agregar información detallada sobre cada tipo de celda
+        for cell_type, number in cell_info.items():
+            report.append(Text(f" -> {cell_type}: {number} Cells", style="bold yellow"))
 
-        return str(report)
+        # Retornar el texto ensamblado como una cadena
+        self.console.print(Text.assemble(*report))
 
 
-def solid_mesh(
-    blade, elementSize: float, layerNumEls: Tuple[int, int, int] = (1, 1, 1)
-):
+def solid_mesh(blade, elementSize: float, layerNumEls: Tuple[int, int, int] = (1, 1, 1)):
     print("#######################")
     print("# Creating Solid Mesh #")
     print("#######################")
@@ -475,9 +474,7 @@ def shell_mesh(blade, elementSize: float):
     [surface_elements_ids_flat.extend(a) for a in surface_elements_ids]
     surface_elements = [mesh["elements"][el] for el in surface_elements_ids_flat]
     surface_nodes = [
-        mesh["nodes"][node]
-        for node in np.array(surface_elements).flatten()
-        if node != -1
+        mesh["nodes"][node] for node in np.array(surface_elements).flatten() if node != -1
     ]
     np.savetxt("/home/infralab/Desktop/turbine-mesher/nodes.txt", surface_nodes)
 
@@ -500,47 +497,41 @@ def meshio_to_trimesh(meshio_mesh):
     # Handle hexahedrons (C3D8) - Generate triangular faces
     for cell in cells.get("hexahedron", []):
         hex_nodes = cell
-        faces.extend(
-            [
-                [hex_nodes[0], hex_nodes[1], hex_nodes[2]],
-                [hex_nodes[0], hex_nodes[2], hex_nodes[3]],
-                [hex_nodes[0], hex_nodes[3], hex_nodes[7]],
-                [hex_nodes[0], hex_nodes[7], hex_nodes[4]],
-                [hex_nodes[4], hex_nodes[5], hex_nodes[6]],
-                [hex_nodes[4], hex_nodes[6], hex_nodes[7]],
-                [hex_nodes[2], hex_nodes[3], hex_nodes[6]],
-                [hex_nodes[3], hex_nodes[7], hex_nodes[6]],
-                [hex_nodes[1], hex_nodes[2], hex_nodes[5]],
-                [hex_nodes[2], hex_nodes[6], hex_nodes[5]],
-                [hex_nodes[1], hex_nodes[5], hex_nodes[4]],
-                [hex_nodes[1], hex_nodes[4], hex_nodes[0]],
-            ]
-        )
+        faces.extend([
+            [hex_nodes[0], hex_nodes[1], hex_nodes[2]],
+            [hex_nodes[0], hex_nodes[2], hex_nodes[3]],
+            [hex_nodes[0], hex_nodes[3], hex_nodes[7]],
+            [hex_nodes[0], hex_nodes[7], hex_nodes[4]],
+            [hex_nodes[4], hex_nodes[5], hex_nodes[6]],
+            [hex_nodes[4], hex_nodes[6], hex_nodes[7]],
+            [hex_nodes[2], hex_nodes[3], hex_nodes[6]],
+            [hex_nodes[3], hex_nodes[7], hex_nodes[6]],
+            [hex_nodes[1], hex_nodes[2], hex_nodes[5]],
+            [hex_nodes[2], hex_nodes[6], hex_nodes[5]],
+            [hex_nodes[1], hex_nodes[5], hex_nodes[4]],
+            [hex_nodes[1], hex_nodes[4], hex_nodes[0]],
+        ])
 
     # Handle wedges (C3D6) - Generate triangular faces
     for cell in cells.get("wedge", []):
         wedge_nodes = cell
-        faces.extend(
-            [
-                [wedge_nodes[0], wedge_nodes[1], wedge_nodes[2]],
-                [wedge_nodes[0], wedge_nodes[2], wedge_nodes[3]],
-                [wedge_nodes[0], wedge_nodes[3], wedge_nodes[4]],
-                [wedge_nodes[0], wedge_nodes[4], wedge_nodes[5]],
-                [wedge_nodes[1], wedge_nodes[2], wedge_nodes[3]],
-                [wedge_nodes[1], wedge_nodes[3], wedge_nodes[4]],
-                [wedge_nodes[1], wedge_nodes[4], wedge_nodes[5]],
-            ]
-        )
+        faces.extend([
+            [wedge_nodes[0], wedge_nodes[1], wedge_nodes[2]],
+            [wedge_nodes[0], wedge_nodes[2], wedge_nodes[3]],
+            [wedge_nodes[0], wedge_nodes[3], wedge_nodes[4]],
+            [wedge_nodes[0], wedge_nodes[4], wedge_nodes[5]],
+            [wedge_nodes[1], wedge_nodes[2], wedge_nodes[3]],
+            [wedge_nodes[1], wedge_nodes[3], wedge_nodes[4]],
+            [wedge_nodes[1], wedge_nodes[4], wedge_nodes[5]],
+        ])
 
     # Handle shell quads - Split quads into two triangles
     for cell in cells.get("quad", []):
         quad_nodes = cell
-        faces.extend(
-            [
-                [quad_nodes[0], quad_nodes[1], quad_nodes[2]],
-                [quad_nodes[0], quad_nodes[2], quad_nodes[3]],
-            ]
-        )
+        faces.extend([
+            [quad_nodes[0], quad_nodes[1], quad_nodes[2]],
+            [quad_nodes[0], quad_nodes[2], quad_nodes[3]],
+        ])
 
     # Handle shell triangles - Use directly as faces
     for cell in cells.get("triangle", []):
@@ -649,29 +640,23 @@ def rotate_mesh(mesh, angle_deg, axis="z"):
     rotation_matrix = np.eye(3)
 
     if axis == "x":
-        rotation_matrix = np.array(
-            [
-                [1, 0, 0],
-                [0, np.cos(angle_rad), -np.sin(angle_rad)],
-                [0, np.sin(angle_rad), np.cos(angle_rad)],
-            ]
-        )
+        rotation_matrix = np.array([
+            [1, 0, 0],
+            [0, np.cos(angle_rad), -np.sin(angle_rad)],
+            [0, np.sin(angle_rad), np.cos(angle_rad)],
+        ])
     elif axis == "y":
-        rotation_matrix = np.array(
-            [
-                [np.cos(angle_rad), 0, np.sin(angle_rad)],
-                [0, 1, 0],
-                [-np.sin(angle_rad), 0, np.cos(angle_rad)],
-            ]
-        )
+        rotation_matrix = np.array([
+            [np.cos(angle_rad), 0, np.sin(angle_rad)],
+            [0, 1, 0],
+            [-np.sin(angle_rad), 0, np.cos(angle_rad)],
+        ])
     elif axis == "z":
-        rotation_matrix = np.array(
-            [
-                [np.cos(angle_rad), -np.sin(angle_rad), 0],
-                [np.sin(angle_rad), np.cos(angle_rad), 0],
-                [0, 0, 1],
-            ]
-        )
+        rotation_matrix = np.array([
+            [np.cos(angle_rad), -np.sin(angle_rad), 0],
+            [np.sin(angle_rad), np.cos(angle_rad), 0],
+            [0, 0, 1],
+        ])
 
     # Apply rotation to each node in the mesh
     rotated_points = np.dot(mesh.points, rotation_matrix.T)

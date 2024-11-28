@@ -1,21 +1,19 @@
-import numpy as np
 import os
-import pyvista as pv
 
-from turbine_mesher.turbine_mesher.mesh import mesh_rotor, shell_mesh, mesh_statistics, solid_mesh
-from turbine_mesher.io.yaml import read_hub_data
+from turbine_mesher.mesh import mesh_rotor, shell_mesh, mesh_statistics, solid_mesh
 from turbine_mesher.io.mesh import write_mesh
 from pynumad.mesh_gen.mesh_tools import *
+from turbine_mesher.mesh import Mesh
 
 
 # ## Define inputs
 CURRENT_FOLDER = os.path.dirname(__file__)
 DATA_FOLDER = os.path.join(CURRENT_FOLDER, "data")
 OUTPUT_FOLDER = os.path.join(CURRENT_FOLDER, "output")
-YAML_NAME = "blade"
+YAML_NAME = "IEA-15-240-RWT"
 
 
-bladeYaml = os.path.join(DATA_FOLDER, "blade.yaml")
+bladeYaml = os.path.join(DATA_FOLDER, f"{YAML_NAME}.yaml")
 # solidMeshFile = os.path.join(OUTPUT_FOLDER, "mesh.vtk")
 # shellMeshFile = os.path.join(OUTPUT_FOLDER, "shell_mesh.vtk")
 # rotorSolidMeshFile = os.path.join(OUTPUT_FOLDER, "rotor_mesh.vtk")
@@ -89,16 +87,15 @@ bladeYaml = os.path.join(DATA_FOLDER, "blade.yaml")
 
 # plt.show()
 
-from turbine_mesher.turbine_mesher.mesh import Mesh
 
-mesh = Mesh(bladeYaml, 0.5)
-# mesh.shell_mesh()
-# print(mesh)
-# mesh.write("output/shell.vtk")
-mesh.solid_mesh()
+mesh = Mesh(bladeYaml, 0.1)
+mesh.shell_mesh()
+# mesh.write(f"{OUTPUT_FOLDER}/shell.vtk")
+mesh.show_statistics()
+# mesh.solid_mesh()
 # mesh.to_gmsh()
-mesh.write("output/solid.vtk")
+# mesh.write("output/solid.vtk")
 # print(mesh)
 # mesh.mesh_rotor(3)
 # mesh.write("output/rotor.vtk")
-print(mesh)
+# print(mesh)
