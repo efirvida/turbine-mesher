@@ -32,9 +32,13 @@ attrs==24.2.0
     # via jsonschema
     # via referencing
 beautifulsoup4==4.12.3
+    # via bs4
     # via nbconvert
+    # via turbine-mesher
 bleach==6.2.0
     # via nbconvert
+bs4==0.0.2
+    # via turbine-mesher
 certifi==2024.8.30
     # via requests
 cffi==1.17.1
