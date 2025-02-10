@@ -10,6 +10,7 @@ dependencies = [
     "meshio>=5.3.5",
     "pip>=24.3.1",
     "pyqt6>=6.8.0",
+    "pyvista>=0.44.2",
 ]
 readme = "README.md"
 requires-python = ">= 3.8"

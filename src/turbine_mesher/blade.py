@@ -80,13 +80,13 @@ class Blade(BaseMesh):
         to create the appropriate mesh for the blade geometry. The type of elements (linear or quadratic) is determined
         by the `use_quadratic_elements` flag.
         """
+        super().__init__()
 
         self._yaml = yaml_file
         self._blade = pynu.Blade(yaml_file)
         self._blade.update_blade()
         self._qudratic_elements = use_quadratic_elements
         self._enforce_triangular_elements = enforce_triangular_elements
-        self._mesh = {}
 
         self._mesh_element_size = element_size
 

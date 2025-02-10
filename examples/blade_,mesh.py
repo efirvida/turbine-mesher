@@ -18,6 +18,8 @@ if __name__ == "__main__":
         OUTPUT_INP = os.path.join(CURRENT_FOLDER, "output", f"Rotor_{blade_name}.inp")
         OUTPUT_VTK = os.path.join(CURRENT_FOLDER, "output", f"Rotor_{blade_name}.vtk")
         rotor = Rotor(blade_yaml_file, element_size=0.5)
+        rotor.plot()
+
         rotor.write_mesh(OUTPUT_INP)
         rotor.write_mesh(OUTPUT_VTK)
 

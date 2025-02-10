@@ -21,6 +21,7 @@ class Rotor(BaseMesh):
         enforce_triangular_elements: bool = False,
         n_samples: int = 300,
     ):
+        super().__init__()
         self._yaml = yaml_file
         self._blade = Blade(
             yaml_file,
@@ -30,7 +31,6 @@ class Rotor(BaseMesh):
             n_samples=n_samples,
         )
         self._blades = []
-        self._mesh = []
 
         with open(self._yaml) as blade_yaml:
             self.__turbine_definition = yaml.load(blade_yaml, Loader=yaml.Loader)

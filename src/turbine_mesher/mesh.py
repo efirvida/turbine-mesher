@@ -3,6 +3,7 @@ from typing import Dict, List, Self, Set
 
 import matplotlib.pyplot as plt
 import numpy as np
+import pyvista as pv
 
 from .enums import ELEMENTS_TO_CALCULIX, ELEMENTS_TO_VTK, Elements
 from .helpers import get_element_type_from_numad
@@ -10,8 +11,32 @@ from .types import PyNuMADMesh
 
 
 class BaseMesh:
+    def __init__(self) -> None:
+        self._mesh = {}
+
     def shell_mesh(self) -> Self:
-        return self
+        raise NotImplementedError("Subclasses must implement this method.")
+
+    @property
+    def mesh(self) -> PyNuMADMesh:
+        """
+        Retrieves the mesh object for the blade, generating it if it does not exist.
+
+        Returns:
+        --------
+        PyNuMADMesh
+            The mesh object representing the discretized geometry of the blade, either created on demand or retrieved
+            from the cached value.
+
+        Notes:
+        ------
+        This property checks if a mesh has already been generated (stored in `_mesh`). If not, it triggers the creation
+        of the mesh using the `__shell_mesh` method. The mesh may be generated using linear or quadratic elements depending
+        on the configuration provided to the Blade object.
+        """
+        if not self._mesh:
+            self.shell_mesh()
+        return self._mesh
 
     @property
     def nodes(self) -> np.ndarray:
@@ -38,39 +63,13 @@ class BaseMesh:
         return {set_name for set_name, nodes in self.node_sets.items() if node_id in nodes}
 
     @property
-    def elements_class(self) -> dict[Elements, List[int]]:
-        elements_map = {
-            Elements.TRIANGLE: [],
-            Elements.TRIANGLE6: [],
-            Elements.QUAD: [],
-            Elements.QUAD8: [],
-        }
+    def elements_class(self) -> Dict[Elements, List[int]]:
+        elements_map = {el_type: [] for el_type in ELEMENTS_TO_CALCULIX}
         for el_id, element in enumerate(self.elements):
             el_type = get_element_type_from_numad(element)
-            elements_map[el_type].append(el_id)
-
+            if el_type in elements_map:
+                elements_map[el_type].append(el_id)
         return elements_map
-
-    @property
-    def mesh(self) -> PyNuMADMesh:
-        """
-        Retrieves the mesh object for the blade, generating it if it does not exist.
-
-        Returns:
-        --------
-        PyNuMADMesh
-            The mesh object representing the discretized geometry of the blade, either created on demand or retrieved
-            from the cached value.
-
-        Notes:
-        ------
-        This property checks if a mesh has already been generated (stored in `_mesh`). If not, it triggers the creation
-        of the mesh using the `__shell_mesh` method. The mesh may be generated using linear or quadratic elements depending
-        on the configuration provided to the Blade object.
-        """
-        if not self._mesh:
-            self.shell_mesh()
-        return self._mesh
 
     def write_mesh(self, output_file: str) -> None:
         """
@@ -386,6 +385,102 @@ class BaseMesh:
             _write_cells_data(f, self.element_sets, len(self.elements))
             f.write("\n")
             _write_nodes_data(f, self.node_sets, len(self.nodes))
+
+    def plot(
+        self, show=True, show_sets: bool = False, show_edges: bool = True, **kwargs
+    ) -> pv.Plotter:
+        """
+        Visualiza la malla usando PyVista.
+
+        Parámetros:
+        -----------
+        show_sets : bool, opcional
+            Muestra los conjuntos de nodos y elementos como datos escalares.
+        show_edges : bool, opcional
+            Muestra las aristas de los elementos.
+        **kwargs : dict
+            Argumentos adicionales para pyvista.Plotter.
+
+        Retorna:
+        --------
+        pyvista.Plotter
+            Objeto plotter de PyVista con la malla cargada.
+        """
+        if not hasattr(self, "nodes") or not hasattr(self, "elements_class"):
+            raise ValueError("La malla no contiene nodos o elementos válidos.")
+
+        try:
+            if len(self.nodes) == 0:
+                raise ValueError("La malla no contiene nodos.")
+
+            cells = []
+            cell_types = []
+
+            for el_type, el_ids in self.elements_class.items():
+                if not el_ids:
+                    continue
+
+                valid_elements = [
+                    [n for n in self.elements[el_id] if n != -1]
+                    for el_id in el_ids
+                    if el_id in self.elements
+                ]
+
+                for element in valid_elements:
+                    cells.append([len(element)] + element)
+                    cell_types.append(ELEMENTS_TO_VTK.get(el_type, None))
+
+            if cells and all(t is not None for t in cell_types):
+                cells = np.hstack(cells).astype(np.int64)
+                cell_types = np.array(cell_types, dtype=np.uint8)
+            else:
+                raise ValueError("No se encontraron elementos válidos para visualizar.")
+
+            points = np.array(self.nodes, dtype=np.float64)
+            grid = pv.UnstructuredGrid(cells, cell_types, points)
+
+            if show_sets:
+                node_regions = np.full(len(self.nodes), -1, dtype=int)
+                for i, nodes in enumerate(self.node_sets.values()):
+                    node_regions[nodes] = i
+                grid.point_data["Node Sets"] = node_regions
+
+                cell_regions = np.full(len(cell_types), -1, dtype=int)
+                for i, elements in enumerate(self.element_sets.values()):
+                    cell_regions[elements] = i
+                grid.cell_data["Element Sets"] = cell_regions
+
+            plotter = pv.Plotter(**kwargs)
+            plotter.add_mesh(
+                grid,
+                show_edges=show_edges,
+                edge_color="black",
+                color="white",
+                opacity=0.8,
+                scalars="Node Sets" if show_sets else None,
+                render_lines_as_tubes=False,
+            )
+
+            if show_sets:
+                plotter.add_scalar_bar(
+                    title="Node Sets",
+                    n_labels=len(self.node_sets),
+                    italic=False,
+                    bold=True,
+                    title_font_size=20,
+                    label_font_size=16,
+                    color="black",
+                )
+
+            if show:
+                plotter.show()
+
+            return plotter
+
+        except ImportError:
+            raise ImportError("PyVista no está instalado. Instálalo con: pip install pyvista")
+        except Exception as e:
+            raise RuntimeError(f"Error al generar la visualización: {e}")
 
 
 class SquareShapeMesh:
