@@ -8,11 +8,8 @@ authors = [
 dependencies = [
     "pynumad>=1.0.0",
     "meshio>=5.3.5",
-    "trimesh>=4.5.2",
-    "gmsh>=4.13.1",
-    "pyvista[all]>=0.44.1",
-    "bs4>=0.0.2",
-    "beautifulsoup4>=4.12.3",
+    "pip>=24.3.1",
+    "pyqt6>=6.8.0",
 ]
 readme = "README.md"
 requires-python = ">= 3.8"
@@ -37,6 +34,7 @@ packages = ["src/turbine_mesher"]
 [tool.ruff]
 line-length = 100
 target-version = "py38"
+extend-include = ["*.ipynb"]
 
 [tool.ruff.lint]
 ignore = [
@@ -82,6 +80,3 @@ select = [
 exclude = ["migrations", "__manifest__.py", "source/dists/odoo", "source/addons", "source/dists/openupgradelib"]
 preview = true
 
-[tool.ruff.format]
-preview = true
-exclude = ["*.ipynb"]

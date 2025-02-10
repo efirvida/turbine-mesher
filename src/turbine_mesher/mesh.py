@@ -1,733 +1,534 @@
 import os
-from contextlib import redirect_stdout
-from copy import deepcopy
-from io import StringIO
-from typing import Dict, Tuple, Union
+from typing import Dict, List, Self, Set
 
-import meshio
+import matplotlib.pyplot as plt
 import numpy as np
-import pynumad as pynu
-import trimesh
-import yaml
-from pynumad.mesh_gen.mesh_gen import shell_mesh_general, solidMeshFromShell
-from rich.console import Console
-from rich.panel import Panel
-from rich.progress import track
-from rich.text import Text
 
-from turbine_mesher.models import Hub
-from turbine_mesher.types import *
-
-import pyvista as pv
+from .enums import ELEMENTS_TO_CALCULIX, ELEMENTS_TO_VTK, Elements
+from .helpers import get_element_type_from_numad
+from .types import PyNuMADMesh
 
 
-class Mesh:
-    def __init__(
-        self,
-        numad_yaml: str,
-        element_size: float = 0.5,
-        n_samples: int = 300,
-    ):
-        self.console = Console()
+class BaseMesh:
+    def shell_mesh(self) -> Self:
+        return self
 
-        self._yaml = numad_yaml
-        self._blade = pynu.Blade()
-        self._blade.read_yaml(numad_yaml)
-        self._hub = self.__read_hub_data(numad_yaml)
+    @property
+    def nodes(self) -> np.ndarray:
+        return self.mesh["nodes"]
 
-        self._mesh_element_size = element_size
-        self._layer_num_els = (1, 1, 1)
+    @property
+    def elements(self) -> np.ndarray:
+        return np.array(self.mesh["elements"], dtype=np.int32)
 
-        self.has_shell_mesh = False
-        self.has_solid_mesh = False
+    @property
+    def element_sets(self) -> Dict[str, List]:
+        return {el_set["name"]: el_set["labels"] for el_set in self.mesh["sets"]["element"]}
 
-        for stat in self._blade.definition.stations:
-            stat.airfoil.resample(n_samples=n_samples)
+    @property
+    def node_sets(self) -> Dict[str, List]:
+        return {node_set["name"]: node_set["labels"] for node_set in self.mesh["sets"]["node"]}
 
-        self._blade.update_blade()
-        nStations = self._blade.geometry.coordinates.shape[2]
-        minTELengths = 0.001 * np.ones(nStations)
-        self._blade.expand_blade_geometry_te(minTELengths)
-
-    def shell_mesh(self):
-        with self.console.status("[bold blue] Creating PyNuMAD Shell Mesh...", spinner="dots"):
-            mesh = shell_mesh_general(self._blade, False, False, self._mesh_element_size)
-
-        self.blade_root_nodes = np.array([
-            mesh["nodes"][node] for node in mesh["sets"]["node"][0]["labels"]
-        ])
-
-        surface_elements_ids = [
-            label
-            for element in mesh["sets"]["element"]
-            if "w" not in element["name"].lower()
-            for label in element["labels"]
-        ]
-
-        surface_elements = [mesh["elements"][el] for el in surface_elements_ids]
-        self.blade_surface_nodes = {
-            int(node): mesh["nodes"][node]
-            for node in np.array(surface_elements).flatten()
-            if node != -1
+    def get_element_sets(self, element_id) -> Set:
+        return {
+            set_name for set_name, elements in self.element_sets.items() if element_id in elements
         }
 
-        # Actualizar estado interno
-        self.pynumad_shell_mesh = mesh
-        self.has_shell_mesh = True
-        self.has_solid_mesh = False
+    def get_node_sets(self, node_id) -> Set:
+        return {set_name for set_name, nodes in self.node_sets.items() if node_id in nodes}
 
-        with self.console.status("[bold blue] Transform mesh into MeshIO mesh...", spinner="dots"):
-            self._pynumad_to_meshio(self.pynumad_shell_mesh)
+    @property
+    def elements_class(self) -> dict[Elements, List[int]]:
+        elements_map = {
+            Elements.TRIANGLE: [],
+            Elements.TRIANGLE6: [],
+            Elements.QUAD: [],
+            Elements.QUAD8: [],
+        }
+        for el_id, element in enumerate(self.elements):
+            el_type = get_element_type_from_numad(element)
+            elements_map[el_type].append(el_id)
 
-        with self.console.status("[bold blue] Triangulating mesh...", spinner="dots"):
-            self.mesh = self.__triangulate()
-        self.show_statistics()
-        self.console.print("Shell mesh done", style="bold white on blue")
+        return elements_map
 
-    def solid_mesh(self):
-        # Mostrar panel inicial indicando que se está creando la malla
-        with self.console.status("[bold blue]Creating Solid Mesh...", spinner="dots") as status:
-            # Editar los stacks necesarios para la malla sólida
-            self._blade.stackdb.edit_stacks_for_solid_mesh()
-
-            # Suprimir la salida estándar para funciones que imprimen directamente
-            with StringIO() as buf, redirect_stdout(buf):
-                shell_mesh = shell_mesh_general(self._blade, True, True, self._mesh_element_size)
-                mesh = solidMeshFromShell(
-                    self._blade,
-                    shell_mesh,
-                    self._layer_num_els,
-                    self._mesh_element_size,
-                )
-
-            # Recopilar nodos de la raíz de la cuchilla
-            self.blade_root_nodes = [
-                mesh["nodes"][node] for node in mesh["sets"]["node"][0]["labels"]
-            ]
-
-            # Actualizar el estado de la malla
-            self.pynumad_solid_mesh = mesh
-            self.has_shell_mesh = False
-            self.has_solid_mesh = True
-
-            # Exportar a MeshIO
-            self._pynumad_to_meshio(self.pynumad_solid_mesh)
-            self.mesh = self.__convert_hex_to_wedge()
-            self.mesh = self.__tetrahelize()
-            self.console.print(self)
-
-    def mesh_rotor(self, n_blades: int = 3):
+    @property
+    def mesh(self) -> PyNuMADMesh:
         """
-        Generate a mesh for the complete rotor with n_blade blades.
+        Retrieves the mesh object for the blade, generating it if it does not exist.
 
-        :param blade_mesh: Single blade mesh object (meshio.Mesh).
-        :param n_blade: Number of blades to generate.
-        :param hub_radius: Radius of the hub.
-        :return: Full rotor mesh (meshio.Mesh).
+        Returns:
+        --------
+        PyNuMADMesh
+            The mesh object representing the discretized geometry of the blade, either created on demand or retrieved
+            from the cached value.
+
+        Notes:
+        ------
+        This property checks if a mesh has already been generated (stored in `_mesh`). If not, it triggers the creation
+        of the mesh using the `__shell_mesh` method. The mesh may be generated using linear or quadratic elements depending
+        on the configuration provided to the Blade object.
         """
-        blade_mesh = deepcopy(self.mesh)
-        blade_mesh.points[:, 2] += self._hub.radius
+        if not self._mesh:
+            self.shell_mesh()
+        return self._mesh
 
-        rotor_points = blade_mesh.points.copy()
-
-        # Maintain the original node count
-        total_points = rotor_points.copy()
-        total_cells = []  # Empty list to store the cells
-
-        # Renumber elements for each blade and add them to the rotor
-        for i in range(0, n_blades):
-            angle = 360 * i / n_blades  # Rotation angle for this blade
-            rotated_mesh = rotate_mesh(blade_mesh, angle, axis="y")
-
-            # Renumber nodes and elements
-            offset = len(total_points)  # Offset is the number of existing nodes
-            rotated_points = rotated_mesh.points
-            rotated_cells = rotated_mesh.cells
-
-            # Renumber nodes: adjust the indices of elements
-            total_points = np.vstack([total_points, rotated_points])
-
-            # Renumber elements: adjust the node indices in each cell
-            for cell in rotated_cells:  # Iterate over each cell (type, nodes)
-                cell_type = cell.type
-                cell_nodes = cell.data
-                new_cell_nodes = cell_nodes + offset
-                total_cells.append((cell_type, new_cell_nodes))
-
-        # Create a new mesh with renumbered points and cells
-        self.mesh = meshio.Mesh(total_points, total_cells)
-
-    def write(self, output_file: str, **kwargs):
+    def write_mesh(self, output_file: str) -> None:
         """
-        Writes a solid mesh to a file, creating directories if needed.
+        Writes the mesh data to a specified output file in CalculiX (INP) or VTK format.
 
-        :param mesh_obj: Mesh object (MeshIO or PyNuMAD).
-        :param file_name: File name to write the mesh.
+        Parameters:
+        -----------
+        output_file : str
+            Path to the output file where the mesh will be saved. The file extension (e.g., '.inp' or '.vtk')
+            should correspond to the desired format.
+
+        Returns:
+        --------
+        None
+            This function does not return any value. It saves the mesh data to the specified output file.
+
+        Raises:
+        -------
+        NotImplementedError
+            If an unsupported format (other than "inp" or "vtk") is provided, the function raises a NotImplementedError.
+
+        Notes:
+        ------
+        This function automatically checks the specified file format and calls the appropriate helper function
+        (`__write_inp` for CalculiX input files or `__write_vtk` for VTK files) to save the mesh data.
+        If the provided `output_file` does not exist, the function will create the necessary directories before
+        saving the file.
         """
-        # Ensure the directory exists
-        os.makedirs(os.path.dirname(output_file), exist_ok=True)
-
-        # Determine if remeshing is needed based on file extension
-        file_extension = output_file.lower().split(".")[-1]
-        mesh = deepcopy(self.mesh)
-        if file_extension in {"stl", "obj"}:
-            mesh = self._remesh_with_trimesh(mesh)
-
-        # Write using meshio for other formats
-        meshio.write(output_file, mesh, **kwargs)
-
-    def _meshio_to_trimesh(self):
-        """
-        Convert a meshio Mesh to a trimesh object with surface data (triangular faces).
-
-        :param meshio_mesh: meshio Mesh object (can contain hexahedrons, wedges, quads, and triangles).
-        :return: trimesh.Trimesh object (surface only).
-        """
-        # Extract points and cell data
-        points = self.mesh.points
-        cells = self.mesh.cells_dict
-
-        faces = []
-
-        # Handle hexahedrons (C3D8) - Generate triangular faces
-        for cell in cells.get("hexahedron", []):
-            hex_nodes = cell
-            faces.extend([
-                [hex_nodes[0], hex_nodes[1], hex_nodes[2]],
-                [hex_nodes[0], hex_nodes[2], hex_nodes[3]],
-                [hex_nodes[0], hex_nodes[3], hex_nodes[7]],
-                [hex_nodes[0], hex_nodes[7], hex_nodes[4]],
-                [hex_nodes[4], hex_nodes[5], hex_nodes[6]],
-                [hex_nodes[4], hex_nodes[6], hex_nodes[7]],
-                [hex_nodes[2], hex_nodes[3], hex_nodes[6]],
-                [hex_nodes[3], hex_nodes[7], hex_nodes[6]],
-                [hex_nodes[1], hex_nodes[2], hex_nodes[5]],
-                [hex_nodes[2], hex_nodes[6], hex_nodes[5]],
-                [hex_nodes[1], hex_nodes[5], hex_nodes[4]],
-                [hex_nodes[1], hex_nodes[4], hex_nodes[0]],
-            ])
-
-        # Handle wedges (C3D6) - Generate triangular faces
-        for cell in cells.get("wedge", []):
-            wedge_nodes = cell
-            faces.extend([
-                [wedge_nodes[0], wedge_nodes[1], wedge_nodes[2]],
-                [wedge_nodes[0], wedge_nodes[2], wedge_nodes[3]],
-                [wedge_nodes[0], wedge_nodes[3], wedge_nodes[4]],
-                [wedge_nodes[0], wedge_nodes[4], wedge_nodes[5]],
-                [wedge_nodes[1], wedge_nodes[2], wedge_nodes[3]],
-                [wedge_nodes[1], wedge_nodes[3], wedge_nodes[4]],
-                [wedge_nodes[1], wedge_nodes[4], wedge_nodes[5]],
-            ])
-
-        # Handle shell quads - Split quads into two triangles
-        for cell in cells.get("quad", []):
-            quad_nodes = cell
-            faces.extend([
-                [quad_nodes[0], quad_nodes[1], quad_nodes[2]],
-                [quad_nodes[0], quad_nodes[2], quad_nodes[3]],
-            ])
-
-        # Handle shell triangles - Use directly as faces
-        for cell in cells.get("triangle", []):
-            tri_nodes = cell
-            faces.append(tri_nodes)
-
-        # Convert faces to trimesh format
-        trimesh_mesh = trimesh.Trimesh(vertices=points, faces=np.array(faces))
-
-        return trimesh_mesh
-
-    def _remesh_with_trimesh(self):
-        """
-        Remesh the mesh using trimesh (surface remeshing for hexahedrons and wedges).
-
-        :param meshio_mesh: meshio Mesh object.
-        :return: remeshed meshio Mesh object.
-        """
-        # Convert meshio to trimesh (surface)
-        trimesh_mesh = self._meshio_to_trimesh(self.mesh)
-
-        # Perform remeshing on the surface (subdivide or smooth)
-        remeshed_surface = trimesh_mesh.subdivide()  # Example: subdivision
-
-        # Convert back to meshio format (using the remeshed surface)
-        remeshed_mesh = meshio.Mesh(
-            points=remeshed_surface.vertices,
-            cells=[("triangle", remeshed_surface.faces)],
-        )
-
-        return remeshed_mesh
-
-    def _pynumad_to_meshio(self, blade_mesh) -> meshio.Mesh:
-        """
-        Convert a PyNuMAD blade mesh to a `meshio.Mesh` object and optionally save it to a file.
-
-        :param blade_mesh: Dictionary representing the PyNuMAD blade mesh.
-        :param file_name: Optional file name to save the converted mesh.
-        :return: `meshio.Mesh` object.
-        """
-        nodes = np.array(blade_mesh["nodes"])
-        elements = np.array(blade_mesh["elements"])
-
-        # Clasificación de celdas según las reglas dadas
-        cells = {"quad": [], "triangle": [], "hexahedron": [], "wedge": []}
-        for element in elements:
-            if len(element) == 4 and element[3] != -1:  # Quad (S4)
-                cells["quad"].append(element[:4])
-            elif len(element) == 4 and element[3] == -1:  # Triangle (S3)
-                cells["triangle"].append(element[:3])
-            elif len(element) == 8 and element[6] != -1:  # Hexahedron (C3D8I)
-                cells["hexahedron"].append(element[:8])
-            elif len(element) == 8 and element[6] == -1:  # Wedge (C3D6)
-                cells["wedge"].append(element[:6])
-            else:
-                raise ValueError(f"Unknown element type with data: {element}")
-
-        # Convertir las listas de celdas en formato `meshio`
-        mesh_cells = [(key, np.array(value)) for key, value in cells.items() if value]
-        self.mesh = meshio.Mesh(points=nodes, cells=mesh_cells)
-        # self.mesh = self.__reorient_hexa_elements()
-
-    def to_gmsh(self):
-        mesh = deepcopy(self.pynumad_solid_mesh)
-        nodes = mesh["nodes"]
-        elements = mesh["elements"]
-
-        mesh_str = ["$MeshFormat", "2.2 0 8", "$EndMeshFormat", "$Nodes"]
-        mesh_str.append(f"{nodes.shape[0]}")
-        mesh_str.extend([f"{i} {n[0]} {n[1]} {n[2]}" for i, n in enumerate(nodes)])
-        mesh_str.append("$EndNodes")
-
-        mesh_str.append("$Elementsde")
-        mesh_str.append(f"{elements.shape[0] + nodes.shape[0]}")
-        mesh_str.extend([f"{i} 15 2 0 {i} {i}" for i in range(nodes.shape[0])])
-        for el_id, element in enumerate(elements, start=nodes.shape[0]):
-            if len(element) == 8 and element[6] != -1:  # Hexahedron (C3D8I)
-                el_type = 5
-            elif len(element) == 8 and element[6] == -1:  # Wedge (C3D6)
-                el_type = 6
-
-            nodes = " ".join(str(el) for el in element if el != -1)
-
-            mesh_str.append(f"{el_id} {el_type} 2 99 3 {nodes}")
-
-        mesh_str.append("$EndElements")
-        mesh_str.append("$PhysicalNames")
-        mesh_str.append("1")
-        mesh_str.append('1 99 "Volume"')
-        mesh_str.append("$End$PhysicalNames")
-
-        with open("blade.msh", "w") as f:
-            f.write("\n".join(mesh_str))
-
-    def __reorient_hexa_elements(self):
-        mesh = deepcopy(self.mesh)
-        hexa = []
-        wedges = []
-
-        for cell_block in mesh.cells:
-            if cell_block.type == "wedge":
-                wedges.extend(cell_block.data)
-
-        for cell_block in mesh.cells:
-            if cell_block.type == "hexahedron":
-                for element in cell_block.data:
-                    node0, node1, node2, node3, node4, node5, node6, node7 = element
-                    hexa.append([node0, node1, node3, node2, node4, node5, node7, node6])
-
-        new_mesh = meshio.Mesh(
-            points=mesh.points,
-            cells=[("wedge", np.array(wedges)), ("hexahedron", np.array(hexa))],
-        )
-
-        return new_mesh
-
-    def __convert_hex_to_wedge(self):
-        mesh = deepcopy(self.mesh)
-        wedges = []
-
-        for cell_block in mesh.cells:
-            if cell_block.type == "wedge":
-                wedges.extend(cell_block.data)
-
-        for cell_block in mesh.cells:
-            if cell_block.type == "hexahedron":
-                for hex_element in cell_block.data:
-                    node0, node1, node3, node2, node4, node5, node7, node6 = hex_element
-
-                    wedges.append(np.array([node0, node1, node2, node4, node5, node6]))
-
-                    wedges.append(np.array([node1, node3, node2, node5, node7, node6]))
-
-        new_mesh = meshio.Mesh(points=mesh.points, cells=[("wedge", np.array(wedges))])
-
-        return new_mesh
-
-    def __tetrahelize(self):
-        mesh = deepcopy(self.mesh)
-        tetrahedra = []
-
-        def wedge_to_tetra(wedge):
-            n0, n1, n2, n3, n4, n5 = wedge
-            return [[n0, n1, n2, n4], [n0, n2, n3, n4], [n2, n5, n3, n4]]
-
-        for cell_block in mesh.cells:
-            if cell_block.type == "tetra":
-                tetrahedra.extend(cell_block.data)
-
-        for cell_block in mesh.cells:
-            if cell_block.type == "wedge":
-                for wedge_element in cell_block.data:
-                    tetrahedra.extend(wedge_to_tetra(wedge_element))
-
-        new_mesh = meshio.Mesh(points=mesh.points, cells=[("tetra", np.array(tetrahedra))])
-
-        return new_mesh
-
-    def __triangulate(self):
-        mesh = deepcopy(self.mesh)
-        triangles = []
-        for cell_block in mesh.cells:
-            if cell_block.type == "triangle":
-                triangles.extend(cell_block.data)
-
-        for cell_block in mesh.cells:
-            if cell_block.type == "quad":
-                for element in cell_block.data:
-                    node0, node1, node2, node3 = element
-                    triangles.extend([[node0, node1, node2], [node0, node2, node3]])
-
-        new_mesh = meshio.Mesh(points=mesh.points, cells=[("triangle", np.array(triangles))])
-
-        return new_mesh
-
-    @staticmethod
-    def __read_hub_data(yaml_file):
-        with open(yaml_file) as blade_yaml:
-            # data = yaml.load(blade_yaml,Loader=yaml.FullLoader)
-            data = yaml.load(blade_yaml, Loader=yaml.Loader)
-
-        # obtain hub outer shape bem
-        try:
-            return Hub(data["components"]["hub"]["outer_shape_bem"])
-        except KeyError:
-            # older versions of wind ontology do not have 'outer_shape_bem' subsection for hub data
-            return Hub(data["components"]["hub"])
-
-    def show_statistics(self):
-        # Crear el encabezado con estilo
-        report = [Text("Mesh statistics:", style="bold underline magenta")]
-
-        # Agregar información sobre los nodos
-        report.append(Text(f"\nTotal nodes: {self.mesh.points.shape[0]}\n", style="bold cyan"))
-
-        # Calcular y agregar información sobre las celdas totales
-        total_cells = sum(cell.data.shape[0] for cell in self.mesh.cells)
-        report.append(Text(f"Total cells: {total_cells}\n", style="bold green"))
-
-        # Inicializar y calcular el conteo de tipos de celdas
-        cell_info = {t.type: 0 for t in self.mesh.cells}
-        for cell in self.mesh.cells:
-            cell_info[cell.type] += cell.data.shape[0]
-
-        # Agregar tipos de celdas
-        report.append(Text(f"Cell types: {', '.join(cell_info.keys())}\n", style="bold magenta"))
-
-        # Agregar información detallada sobre cada tipo de celda
-        for cell_type, number in cell_info.items():
-            report.append(Text(f" -> {cell_type}: {number} Cells", style="bold yellow"))
-
-        # Retornar el texto ensamblado como una cadena
-        self.console.print(Text.assemble(*report))
-
-
-def solid_mesh(blade, elementSize: float, layerNumEls: Tuple[int, int, int] = (1, 1, 1)):
-    print("#######################")
-    print("# Creating Solid Mesh #")
-    print("#######################")
-    blade.stackdb.edit_stacks_for_solid_mesh()
-    shellMesh = shell_mesh_general(blade, True, True, elementSize)
-    print("finished shell mesh")
-    mesh = solidMeshFromShell(blade, shellMesh, layerNumEls, elementSize)
-    print("Meshing Done!")
-    print("#######################")
-    root_nodes = [mesh["nodes"][node] for node in mesh["sets"]["node"][0]["labels"]]
-    np.savetxt("/home/infralab/Desktop/turbine-mesher/rootNodes.txt", root_nodes)
-    return pynumad_to_meshio(mesh)
-
-
-def shell_mesh(blade, elementSize: float):
-    print("#######################")
-    print("# Creating Shell Mesh #")
-    print("#######################")
-    mesh = shell_mesh_general(blade, False, False, elementSize)
-    print("Meshing Done!")
-    print("#######################")
-    root_nodes = [mesh["nodes"][node] for node in mesh["sets"]["node"][0]["labels"]]
-    surface_elements_ids = [
-        element["labels"]
-        for element in mesh["sets"]["element"]
-        if "w" not in element["name"].lower()
-    ]
-    surface_elements_ids_flat = []
-    [surface_elements_ids_flat.extend(a) for a in surface_elements_ids]
-    surface_elements = [mesh["elements"][el] for el in surface_elements_ids_flat]
-    surface_nodes = [
-        mesh["nodes"][node] for node in np.array(surface_elements).flatten() if node != -1
-    ]
-    np.savetxt("/home/infralab/Desktop/turbine-mesher/nodes.txt", surface_nodes)
-
-    return pynumad_to_meshio(mesh)
-
-
-def meshio_to_trimesh(meshio_mesh):
-    """
-    Convert a meshio Mesh to a trimesh object with surface data (triangular faces).
-
-    :param meshio_mesh: meshio Mesh object (can contain hexahedrons, wedges, quads, and triangles).
-    :return: trimesh.Trimesh object (surface only).
-    """
-    # Extract points and cell data
-    points = meshio_mesh.points
-    cells = meshio_mesh.cells_dict
-
-    faces = []
-
-    # Handle hexahedrons (C3D8) - Generate triangular faces
-    for cell in cells.get("hexahedron", []):
-        hex_nodes = cell
-        faces.extend([
-            [hex_nodes[0], hex_nodes[1], hex_nodes[2]],
-            [hex_nodes[0], hex_nodes[2], hex_nodes[3]],
-            [hex_nodes[0], hex_nodes[3], hex_nodes[7]],
-            [hex_nodes[0], hex_nodes[7], hex_nodes[4]],
-            [hex_nodes[4], hex_nodes[5], hex_nodes[6]],
-            [hex_nodes[4], hex_nodes[6], hex_nodes[7]],
-            [hex_nodes[2], hex_nodes[3], hex_nodes[6]],
-            [hex_nodes[3], hex_nodes[7], hex_nodes[6]],
-            [hex_nodes[1], hex_nodes[2], hex_nodes[5]],
-            [hex_nodes[2], hex_nodes[6], hex_nodes[5]],
-            [hex_nodes[1], hex_nodes[5], hex_nodes[4]],
-            [hex_nodes[1], hex_nodes[4], hex_nodes[0]],
-        ])
-
-    # Handle wedges (C3D6) - Generate triangular faces
-    for cell in cells.get("wedge", []):
-        wedge_nodes = cell
-        faces.extend([
-            [wedge_nodes[0], wedge_nodes[1], wedge_nodes[2]],
-            [wedge_nodes[0], wedge_nodes[2], wedge_nodes[3]],
-            [wedge_nodes[0], wedge_nodes[3], wedge_nodes[4]],
-            [wedge_nodes[0], wedge_nodes[4], wedge_nodes[5]],
-            [wedge_nodes[1], wedge_nodes[2], wedge_nodes[3]],
-            [wedge_nodes[1], wedge_nodes[3], wedge_nodes[4]],
-            [wedge_nodes[1], wedge_nodes[4], wedge_nodes[5]],
-        ])
-
-    # Handle shell quads - Split quads into two triangles
-    for cell in cells.get("quad", []):
-        quad_nodes = cell
-        faces.extend([
-            [quad_nodes[0], quad_nodes[1], quad_nodes[2]],
-            [quad_nodes[0], quad_nodes[2], quad_nodes[3]],
-        ])
-
-    # Handle shell triangles - Use directly as faces
-    for cell in cells.get("triangle", []):
-        tri_nodes = cell
-        faces.append(tri_nodes)
-
-    # Convert faces to trimesh format
-    trimesh_mesh = trimesh.Trimesh(vertices=points, faces=np.array(faces))
-
-    return trimesh_mesh
-
-
-def remesh_with_trimesh(meshio_mesh):
-    """
-    Remesh the mesh using trimesh (surface remeshing for hexahedrons and wedges).
-
-    :param meshio_mesh: meshio Mesh object.
-    :return: remeshed meshio Mesh object.
-    """
-    # Convert meshio to trimesh (surface)
-    trimesh_mesh = meshio_to_trimesh(meshio_mesh)
-
-    # Perform remeshing on the surface (subdivide or smooth)
-    remeshed_surface = trimesh_mesh.subdivide()  # Example: subdivision
-
-    # Convert back to meshio format (using the remeshed surface)
-    remeshed_mesh = meshio.Mesh(
-        points=remeshed_surface.vertices, cells=[("triangle", remeshed_surface.faces)]
-    )
-
-    return remeshed_mesh
-
-
-def mesh_statistics(mesh):
-    """
-    Print general statistics of the mesh.
-
-    :param mesh: Mesh object (meshio.Mesh).
-    """
-    print("Mesh statistics:")
-
-    # Total number of points
-    print(f"Total nodes: {mesh.points.shape[0]}")
-
-    # Total number of cells
-    total_cells = sum([cell.data.shape[0] for cell in mesh.cells])
-    print(f"Total cells: {total_cells}")
-
-    # Types of cells and how many there are of each type
-    cell_types = set(cell.type for cell in mesh.cells)
-    print(f"Cell types: {cell_types}")
-    for cell_type in cell_types:
-        cell_count = sum([1 for cell in mesh.cells if cell.type == cell_type])
-        print(f"  {cell_type}: {cell_count} cells")
-
-
-def pynumad_to_meshio(blade_mesh: Dict, file_name: str = None) -> meshio.Mesh:
-    """
-    Convert a PyNuMAD blade mesh to a `meshio.Mesh` object and optionally save it to a file.
-
-    :param blade_mesh: Dictionary representing the PyNuMAD blade mesh.
-    :param file_name: Optional file name to save the converted mesh.
-    :return: `meshio.Mesh` object.
-    """
-    nodes = np.array(blade_mesh["nodes"])
-    elements = np.array(blade_mesh["elements"])
-
-    # Clasificación de celdas según las reglas dadas
-    cells = {"quad": [], "triangle": [], "hexahedron": [], "wedge": []}
-
-    for element in elements:
-        if len(element) == 4 and element[3] != -1:  # Quad (S4)
-            cells["quad"].append(element[:4])
-        elif len(element) == 4 and element[3] == -1:  # Triangle (S3)
-            cells["triangle"].append(element[:3])
-        elif len(element) == 8 and element[6] != -1:  # Hexahedron (C3D8I)
-            cells["hexahedron"].append(element[:8])
-        elif len(element) == 8 and element[6] == -1:  # Wedge (C3D6)
-            cells["wedge"].append(element[:6])
+        output_dir = os.path.dirname(output_file)
+        if output_dir and not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+
+        if output_file.lower().endswith("inp"):
+            self.__write_inp(output_file)
+        elif output_file.lower().endswith("vtk"):
+            self.__write_vtk(output_file)
         else:
-            raise ValueError(f"Unknown element type with data: {element}")
+            raise NotImplementedError(
+                "Only supported formats are 'inp' (CalculiX) and 'vtk' (VTK)."
+            )
 
-    # Convertir las listas de celdas en formato `meshio`
-    mesh_cells = [(key, np.array(value)) for key, value in cells.items() if value]
+    def __write_inp(self, filename: str) -> None:
+        """
+        Writes the mesh data to a CalculiX input (INP) file.
 
-    # Crear el objeto meshio.Mesh
-    mesh = meshio.Mesh(points=nodes, cells=mesh_cells)
+        Parameters:
+        -----------
+        filename : str
+            The name (including path) of the INP file to be created. This file will contain the mesh data in the
+            CalculiX input format, which can be used for finite element analysis simulations.
 
-    # Escribir el archivo opcionalmente
-    if file_name:
-        meshio.write(file_name, mesh)
+        mesh : PyNuMADMesh
+            The mesh object containing the mesh data to be written to the INP file. The mesh data should include the
+            necessary element types, node information, and material properties as required by the CalculiX solver.
 
-    return mesh
+        Returns:
+        --------
+        None
+            This function does not return any value. It writes the mesh data to the specified INP file.
+
+        Notes:
+        ------
+        The function will translate the mesh data, including elements, nodes, and other necessary details, into a format
+        compatible with CalculiX input files. It ensures the proper formatting and organization of the mesh data,
+        allowing it to be used directly in a CalculiX simulation.
+
+        This method is typically used when preparing mesh data for structural or mechanical simulations using the
+        CalculiX solver, which requires input files in the INP format.
+
+        Example usage:
+        --------------
+        To write a mesh to a CalculiX input file, use the following:
+
+        ```python
+        blade = Blade(yaml_file="path/to/blade_config.yaml")
+        blade.write_mesh("output_mesh.inp", format="inp")
+        ```
+
+        The function automatically formats the mesh data and writes it to the specified file.
+        """
+
+        def split(arr):
+            chunk_size = 8
+            return [arr[i : i + chunk_size] for i in range(0, len(arr), chunk_size)]
+
+        mesh = self.mesh
+        with open(filename, "wt") as f:
+            f.write("**************++***********\n")
+            f.write("**      MESH NODES       **\n")
+            f.write("***************************\n")
+            f.write("*NODE, NSET=N_ALL\n")
+            for i, nd in enumerate(self.nodes, start=1):
+                ln = f"{str(i)}, {', '.join(f'{n:.10e}' for n in nd)} \n"
+                f.write(ln)
+
+            f.write("\n**************++**++++********\n")
+            f.write("**      MESH ELEMENTS       **\n")
+            f.write("***********************+++****\n")
+            for element_kind in ELEMENTS_TO_CALCULIX:
+                if self.elements_class[element_kind]:
+                    f.write(
+                        f"*ELEMENT, TYPE={ELEMENTS_TO_CALCULIX[element_kind].value}, ELSET=E_ALL\n"
+                    )
+                    for i, el in enumerate(self.elements, start=1):
+                        if element_kind == get_element_type_from_numad(el):
+                            ln = f"{str(i)}, {', '.join(str(n + 1) for n in el if n != -1)} \n"
+                            f.write(ln)
+
+            f.write("\n**************+++*****+**********++**************\n")
+            f.write("**      ELEMENT SETS DEFINITION SECTION       **\n")
+            f.write("*******************+++++************************\n")
+
+            for name, labels in self.element_sets.items():
+                ln = f"*ELSET, ELSET=E_{name}\n"
+                f.write(ln)
+                for el in split(labels):
+                    ln = ", ".join(str(e + 1) for e in el) + "\n"
+                    f.write(ln)
+                f.write("\n")
+
+            f.write("\n**************************+****++*************\n")
+            f.write("**       NODE SETS DEFINITION SECTION       **\n")
+            f.write("*************************+++******************\n")
+
+            for name, labels in self.node_sets.items():
+                ln = f"*NSET, NSET=N_{name}\n"
+                f.write(ln)
+                for nd in split(labels):
+                    ln = ", ".join(str(n + 1) for n in nd) + "\n"
+                    f.write(ln)
+                f.write("\n")
+
+            f.write("\n*******************************************\n")
+            f.write("**            MATERIALS SECTION          **\n")
+            f.write("*******************************************\n")
+
+            for mat in mesh["materials"]:
+                ln = "*MATERIAL, NAME=" + mat["name"] + "\n"
+                f.write(ln)
+                f.write("*DENSITY\n")
+                ln = str(mat["density"]) + ",\n"
+                f.write(ln)
+                f.write("*ELASTIC, TYPE=ENGINEERING CONSTANTS\n")
+                E = mat["elastic"]["E"]
+                nu = mat["elastic"]["nu"]
+                G = mat["elastic"]["G"]
+                eProps = [str(E[0]), str(E[1]), str(E[2])]
+                eProps.extend([str(nu[0]), str(nu[1]), str(nu[2])])
+                eProps.extend([str(G[0]), str(G[1]), str(G[2])])
+                ln = ", ".join(eProps[0:8]) + "\n"
+                f.write(ln)
+                ln = eProps[8] + ",\n\n"
+                f.write(ln)
+
+            # f.write("\n**************************************\n")
+            # f.write("**        ORIENTATION SECTION       **\n")
+            # f.write("**************************************\n")
+            # for sec in mesh["sections"]:
+            #     ln = "*ORIENTATION, NAME=ORI_" + sec["elementSet"] + ", SYSTEM=RECTANGULAR\n"
+            #     f.write(ln)
+            #     dataLn = list()
+            #     for d in sec["xDir"]:
+            #         dataLn.append(f"{d:.10e}")
+            #     for d in sec["xyDir"]:
+            #         dataLn.append(f"{d:.10e}")
+            #     dataStr = ", ".join(dataLn) + "\n"
+            #     f.write(dataStr)
+            #     f.write("3, 0.\n\n")
+
+            f.write("\n*******************************************\n")
+            f.write("**        SHELL DEFINITION SECTION       **\n")
+            f.write("*******************************************\n")
+            if True:
+                for sec in mesh["sections"]:
+                    snm = sec["elementSet"]
+                    # ln = f"*SHELL SECTION, ELSET=E_{snm}, ORIENTATION=ORI_{snm}, MATERIAL={sec['layup'][0][0]}, OFFSET=0.0\n"
+                    ln = f"*SHELL SECTION, ELSET=E_{snm}, MATERIAL={sec['layup'][0][0]}, OFFSET=0.0\n"
+                    f.write(ln)
+                    thikness = sum(lay[1] for lay in sec["layup"])
+                    f.write(f"{thikness:.10e}\n")
+            else:
+                for sec in mesh["sections"]:
+                    snm = sec["elementSet"]
+                    ln = f"*SHELL SECTION, ELSET=E_{snm}, COMPOSITE, ORIENTATION=ORI_{snm}, OFFSET=0.0\n"
+                    f.write(ln)
+                    for lay in sec["layup"]:
+                        layStr = f"{lay[1]:.10e}, {lay[2]:.10e}, {lay[0]}\n"
+                        f.write(layStr)
+                    f.write("\n")
+
+            f.write("\n********************************\n")
+            f.write("**        STEPS SECTION       **\n")
+            f.write("********************************\n")
+
+    def __write_vtk(self, filename: str) -> None:
+        """
+        Writes the mesh data to a VTK (Visualization Toolkit) file format.
+
+        Parameters:
+        -----------
+        filename : str
+            The name (including path) of the VTK file to be created. This file will contain the mesh data
+            in the VTK format, which is commonly used for visualization and post-processing purposes.
+
+        mesh : PyNuMADMesh
+            The mesh object containing the mesh data to be written to the VTK file. The mesh should include
+            node coordinates, element connectivity, and any other necessary attributes required for visualization.
+
+        Returns:
+        --------
+        None
+            This function does not return any value. It writes the mesh data to the specified VTK file.
+
+        Notes:
+        ------
+        The VTK file format is widely used for visualizing mesh data in post-processing tools such as ParaView,
+        VisIt, or other visualization software. This function translates the mesh data into the VTK format,
+        ensuring it is compatible with these tools.
+
+        The VTK format supports a variety of visualization features, and the output file will be readable by any
+        software that supports VTK files, allowing for mesh rendering and further analysis.
+
+        Example usage:
+        --------------
+        To write a mesh to a VTK file, you can use the following:
+
+        ```python
+        blade = Blade(yaml_file="path/to/blade_config.yaml")
+        blade.write_mesh("output_mesh.vtk", format="vtk")
+        ```
+
+        This will create a VTK file containing the mesh data, which can then be loaded into a visualization
+        software for inspection.
+        """
+        vtk_to_numpy_dtype_name = {
+            "float": "float32",
+            "double": "float64",
+            "int": "int",
+            "vtktypeint8": "int8",
+            "vtktypeint16": "int16",
+            "vtktypeint32": "int32",
+            "vtktypeint64": "int64",
+            "vtktypeuint8": "uint8",
+            "vtktypeuint16": "uint16",
+            "vtktypeuint32": "uint32",
+            "vtktypeuint64": "uint64",
+        }
+        numpy_to_vtk_dtype = {v: k for k, v in vtk_to_numpy_dtype_name.items()}
+
+        def _write_points(f, points):
+            dtype = numpy_to_vtk_dtype[points.dtype.name]
+            f.write(f"POINTS {len(points)} {dtype}\n")
+            for point in points:
+                f.write(f"{' '.join(f'{p:.5f}' for p in point)}\n")
+            f.write("\n")
+
+        def _write_cells(f, elements):
+            total_size = len(self.elements) + sum(1 for el in self.elements for n in el if n != -1)
+
+            f.write(f"CELLS {elements.shape[0]} {total_size}\n")
+            for cell in elements:
+                nodes = [str(c) for c in cell if c != -1]
+                f.write(f"{len(nodes)} {' '.join(nodes)}\n")
+            f.write("\n")
+
+            f.write(f"CELL_TYPES {len(elements)}\n")
+            for el in elements:
+                el_type = get_element_type_from_numad(el)
+                vtk_type = ELEMENTS_TO_VTK[el_type]
+                f.write(f"{vtk_type}\n")
+            f.write("\n")
+
+        def _write_cells_data(f, cell_sets, total_cells):
+            region_data = np.full(total_cells, -1, dtype=int)
+
+            for region_value, (set_name, elements) in enumerate(cell_sets.items()):
+                if "all" not in set_name:
+                    region_data[elements] = region_value
+
+            f.write(f"CELL_DATA {total_cells}\n")
+            f.write("SCALARS CellRegions int 1\n")
+            f.write("LOOKUP_TABLE default\n")
+
+            for value in region_data:
+                f.write(f"{value}\n")
+            f.write("\n")
+
+        def _write_nodes_data(f, node_sets, total_nodes):
+            region_data = np.full(total_nodes, -1, dtype=int)
+
+            sorted_sets = sorted(node_sets.items(), key=lambda item: len(item[1]), reverse=True)
+
+            for region_value, (set_name, nodes) in enumerate(sorted_sets):
+                region_data[nodes] = region_value
+
+            f.write(f"POINT_DATA {total_nodes}\n")
+            f.write("SCALARS NodeRegions int 1\n")
+            f.write("LOOKUP_TABLE default\n")
+
+            np.savetxt(f, region_data, fmt="%d")
+            f.write("\n")
+
+        with open(filename, "w") as f:
+            f.write("# vtk DataFile Version 2.01\n")
+            f.write("Unstructured Grid Example\n")
+            f.write("ASCII\n")
+            f.write("DATASET UNSTRUCTURED_GRID\n")
+
+            _write_points(f, self.nodes)
+            f.write("\n")
+            _write_cells(f, self.elements)
+            f.write("\n")
+            _write_cells_data(f, self.element_sets, len(self.elements))
+            f.write("\n")
+            _write_nodes_data(f, self.node_sets, len(self.nodes))
 
 
-def rotate_mesh(mesh, angle_deg, axis="z"):
+class SquareShapeMesh:
     """
-    Rotate the mesh around a given axis (default is 'z').
+    A class for generating and visualizing structured quadrilateral meshes.
 
-    :param mesh: Mesh object (meshio.Mesh).
-    :param angle_deg: Rotation angle in degrees.
-    :param axis: Axis around which to rotate ('x', 'y', 'z').
-    :return: New rotated mesh.
+    Attributes
+    ----------
+    width : float
+        Width of the domain.
+    height : float
+        Height of the domain.
+    nx : int
+        Number of elements along the x-direction.
+    ny : int
+        Number of elements along the y-direction.
+    nodes : np.ndarray
+        Array containing node coordinates.
+    elements : np.ndarray
+        Array containing element connectivity.
+    dim : int
+        Mesh dimension, dim = 2.
     """
-    angle_rad = np.radians(angle_deg)
-    rotation_matrix = np.eye(3)
 
-    if axis == "x":
-        rotation_matrix = np.array([
-            [1, 0, 0],
-            [0, np.cos(angle_rad), -np.sin(angle_rad)],
-            [0, np.sin(angle_rad), np.cos(angle_rad)],
-        ])
-    elif axis == "y":
-        rotation_matrix = np.array([
-            [np.cos(angle_rad), 0, np.sin(angle_rad)],
-            [0, 1, 0],
-            [-np.sin(angle_rad), 0, np.cos(angle_rad)],
-        ])
-    elif axis == "z":
-        rotation_matrix = np.array([
-            [np.cos(angle_rad), -np.sin(angle_rad), 0],
-            [np.sin(angle_rad), np.cos(angle_rad), 0],
-            [0, 0, 1],
-        ])
+    def __init__(self, width: float, height: float, nx: int, ny: int):
+        """
+        Initializes the mesh generator with domain dimensions and discretization parameters.
 
-    # Apply rotation to each node in the mesh
-    rotated_points = np.dot(mesh.points, rotation_matrix.T)
-    return meshio.Mesh(rotated_points, mesh.cells)
+        Parameters
+        ----------
+        width : float
+            Width of the domain.
+        height : float
+            Height of the domain.
+        nx : int
+            Number of elements along the x-direction.
+        ny : int
+            Number of elements along the y-direction.
+        """
+        self.dim = 2  # 2D mesh
+        self.width = width
+        self.height = height
+        self.nx = nx
+        self.ny = ny
+        self.nodes = None
+        self.elements = None
+        self.generate_mesh()
+
+    def generate_mesh(self):
+        """
+        Generates the quadrilateral mesh.
+        """
+        x = np.linspace(0, self.width, self.nx + 1)
+        y = np.linspace(0, self.height, self.ny + 1)
+        X, Y = np.meshgrid(x, y)
+        self.nodes = np.column_stack([X.ravel(), Y.ravel()])
+
+        elements = []
+        for j in range(self.ny):
+            for i in range(self.nx):
+                n1 = j * (self.nx + 1) + i
+                n2 = n1 + 1
+                n3 = n1 + (self.nx + 1)
+                n4 = n3 + 1
+                elements.append([n1, n2, n4, n3])
+
+        self.elements = np.array(elements, dtype=int)
+
+    def plot(self):
+        """
+        Plots the generated mesh.
+        """
+        fig, ax = plt.subplots()
+        for element in self.elements:
+            polygon = self.nodes[element]
+            polygon = np.vstack([polygon, polygon[0]])  # Close the quadrilateral
+            ax.plot(polygon[:, 0], polygon[:, 1], "k")
+
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
+        ax.set_title("Quadrilateral Mesh")
+        ax.set_aspect("equal")
+        plt.show()
+
+    @property
+    def num_nodes(self):
+        return self.nodes.shape[0]
+
+    @property
+    def x(self):
+        return self.nodes[:, 0]
+
+    @property
+    def y(self):
+        return self.nodes[:, 1]
+
+    @classmethod
+    def create_rectangle(cls, width: float, height: float, nx: int, ny: int):
+        """
+        Creates a quadrilateral mesh for a rectangular domain.
+
+        Parameters
+        ----------
+        width : float
+            Width of the rectangle.
+        height : float
+            Height of the rectangle.
+        nx : int
+            Number of elements along the x-axis.
+        ny : int
+            Number of elements along the y-axis.
+
+        Returns
+        -------
+        MeshGenerator
+            An instance of MeshGenerator with the specified parameters.
+        """
+        return cls(width, height, nx, ny)
+
+    @classmethod
+    def create_unit_square(cls, nx: int, ny: int):
+        """
+        Creates a quadrilateral mesh for a unit square domain (1x1).
+
+        Parameters
+        ----------
+        nx : int
+            Number of elements along the x-axis.
+        ny : int
+            Number of elements along the y-axis.
+
+        Returns
+        -------
+        MeshGenerator
+            An instance of MeshGenerator with the specified parameters.
+        """
+        return cls(1.0, 1.0, nx, ny)
 
 
-def mesh_rotor(blade_mesh, n_blade, hub_radius):
-    """
-    Generate a mesh for the complete rotor with n_blade blades.
+# Example usage
+if __name__ == "__main__":
+    mesh = SquareShapeMesh.create_rectangle(width=2.0, height=1.0, nx=4, ny=2)
+    mesh.plot()
 
-    :param blade_mesh: Single blade mesh object (meshio.Mesh).
-    :param n_blade: Number of blades to generate.
-    :param hub_radius: Radius of the hub.
-    :return: Full rotor mesh (meshio.Mesh).
-    """
-    if isinstance(blade_mesh, dict):
-        blade_mesh = pynumad_to_meshio(blade_mesh)
-    blade_mesh.points[:, 2] += hub_radius
-
-    rotor_points = blade_mesh.points.copy()
-
-    # Maintain the original node count
-    total_points = rotor_points.copy()
-    total_cells = []  # Empty list to store the cells
-
-    # Renumber elements for each blade and add them to the rotor
-    for i in range(0, n_blade):
-        angle = 360 * i / n_blade  # Rotation angle for this blade
-        rotated_mesh = rotate_mesh(blade_mesh, angle, axis="y")
-
-        # Renumber nodes and elements
-        offset = len(total_points)  # Offset is the number of existing nodes
-        rotated_points = rotated_mesh.points
-        rotated_cells = rotated_mesh.cells
-
-        # Renumber nodes: adjust the indices of elements
-        total_points = np.vstack([total_points, rotated_points])
-
-        # Renumber elements: adjust the node indices in each cell
-        for cell in rotated_cells:  # Iterate over each cell (type, nodes)
-            cell_type = cell.type
-            cell_nodes = cell.data
-            new_cell_nodes = cell_nodes + offset
-            total_cells.append((cell_type, new_cell_nodes))
-
-    # Create a new mesh with renumbered points and cells
-    rotor_mesh = meshio.Mesh(total_points, total_cells)
-
-    return rotor_mesh
-
-
-def write_mesh(mesh_obj: Union[PyNuMADMesh, MeshIOMesh], file_name: str):
-    """
-    Writes a solid mesh to a file, creating directories if needed.
-
-    :param mesh_obj: Mesh object (MeshIO or PyNuMAD).
-    :param file_name: File name to write the mesh.
-    """
-    # Ensure the directory exists
-    os.makedirs(os.path.dirname(file_name), exist_ok=True)
-
-    # Convert to meshio.Mesh if input is a PyNuMAD dictionary
-    if isinstance(mesh_obj, dict):
-        mesh = pynumad_to_meshio(mesh_obj)
-    else:
-        mesh = mesh_obj
-
-    # Determine if remeshing is needed based on file extension
-    file_extension = file_name.lower().split(".")[-1]
-    if file_extension in {"stl", "obj"}:
-        mesh = remesh_with_trimesh(mesh)
-
-    # Write using meshio for other formats
-    meshio.write(file_name, mesh)
+    unit_mesh = SquareShapeMesh.create_unit_square(nx=5, ny=5)
+    unit_mesh.plot()

@@ -1,5 +1,8 @@
-from typing import Dict
-import meshio
+from typing import Any, Dict, List
 
-PyNuMADMesh = Dict[str, list]
+import meshio
+import pynumad
+
+PyNuMADMesh = Dict[str, List[Any]]
+PyNuMADBlade = pynumad.Blade
 MeshIOMesh = meshio.Mesh
