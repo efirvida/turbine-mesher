@@ -132,4 +132,4 @@ def rotate_around_y(coords, angle) -> np.ndarray:
     # Apply the rotation to each node in the mesh
     rotated_mesh = np.dot(coords, rotation_matrix.T)
 
-    return rotated_mesh
+    return rotated_mesh.copy()

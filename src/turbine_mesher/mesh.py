@@ -1,18 +1,33 @@
 import os
 from typing import Dict, List, Self, Set
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pyvista as pv
+from rich.progress import Progress
+from scipy.spatial import KDTree
 
 from .enums import ELEMENTS_TO_CALCULIX, ELEMENTS_TO_VTK, Elements
 from .helpers import get_element_type_from_numad
 from .types import PyNuMADMesh
+from .viewer import plot_mesh
 
 
 class BaseMesh:
-    def __init__(self) -> None:
-        self._mesh = {}
+    def __init__(
+        self,
+        use_quadratic_elements: bool = True,
+        enforce_triangular_elements: bool = False,
+    ) -> None:
+        self._qudratic_elements = use_quadratic_elements
+        self._enforce_triangular_elements = enforce_triangular_elements
+
+        self._mesh = {
+            "nodes": [],
+            "elements": [],
+            "sets": {"node": [], "element": []},
+            "materials": [],
+            "sections": [],
+        }
 
     def shell_mesh(self) -> Self:
         raise NotImplementedError("Subclasses must implement this method.")
@@ -34,24 +49,40 @@ class BaseMesh:
         of the mesh using the `__shell_mesh` method. The mesh may be generated using linear or quadratic elements depending
         on the configuration provided to the Blade object.
         """
-        if not self._mesh:
-            self.shell_mesh()
-        return self._mesh
+        if len(self._mesh["nodes"]):
+            return self._mesh
+        self.shell_mesh()
+
+    @property
+    def num_nodes(self):
+        return self.nodes.shape[0]
+
+    @property
+    def x(self):
+        return self.nodes[:, 0]
+
+    @property
+    def y(self):
+        return self.nodes[:, 1]
+
+    @property
+    def z(self):
+        return self.nodes[:, 2]
 
     @property
     def nodes(self) -> np.ndarray:
-        return self.mesh["nodes"]
+        return np.array(self.mesh["nodes"], dtype=np.float64)
 
     @property
     def elements(self) -> np.ndarray:
         return np.array(self.mesh["elements"], dtype=np.int32)
 
     @property
-    def element_sets(self) -> Dict[str, List]:
+    def element_sets(self) -> Dict[str, List[int]]:
         return {el_set["name"]: el_set["labels"] for el_set in self.mesh["sets"]["element"]}
 
     @property
-    def node_sets(self) -> Dict[str, List]:
+    def node_sets(self) -> Dict[str, List[int]]:
         return {node_set["name"]: node_set["labels"] for node_set in self.mesh["sets"]["node"]}
 
     def get_element_sets(self, element_id) -> Set:
@@ -98,6 +129,9 @@ class BaseMesh:
         If the provided `output_file` does not exist, the function will create the necessary directories before
         saving the file.
         """
+
+        _ = self.mesh  # <- ensure meshing
+
         output_dir = os.path.dirname(output_file)
         if output_dir and not os.path.exists(output_dir):
             os.makedirs(output_dir)
@@ -155,7 +189,6 @@ class BaseMesh:
             chunk_size = 8
             return [arr[i : i + chunk_size] for i in range(0, len(arr), chunk_size)]
 
-        mesh = self.mesh
         with open(filename, "wt") as f:
             f.write("**************++***********\n")
             f.write("**      MESH NODES       **\n")
@@ -206,7 +239,7 @@ class BaseMesh:
             f.write("**            MATERIALS SECTION          **\n")
             f.write("*******************************************\n")
 
-            for mat in mesh["materials"]:
+            for mat in self.mesh["materials"]:
                 ln = "*MATERIAL, NAME=" + mat["name"] + "\n"
                 f.write(ln)
                 f.write("*DENSITY\n")
@@ -243,7 +276,7 @@ class BaseMesh:
             f.write("**        SHELL DEFINITION SECTION       **\n")
             f.write("*******************************************\n")
             if True:
-                for sec in mesh["sections"]:
+                for sec in self.mesh["sections"]:
                     snm = sec["elementSet"]
                     # ln = f"*SHELL SECTION, ELSET=E_{snm}, ORIENTATION=ORI_{snm}, MATERIAL={sec['layup'][0][0]}, OFFSET=0.0\n"
                     ln = f"*SHELL SECTION, ELSET=E_{snm}, MATERIAL={sec['layup'][0][0]}, OFFSET=0.0\n"
@@ -362,7 +395,7 @@ class BaseMesh:
 
             sorted_sets = sorted(node_sets.items(), key=lambda item: len(item[1]), reverse=True)
 
-            for region_value, (set_name, nodes) in enumerate(sorted_sets):
+            for region_value, (_, nodes) in enumerate(sorted_sets):
                 region_data[nodes] = region_value
 
             f.write(f"POINT_DATA {total_nodes}\n")
@@ -386,104 +419,176 @@ class BaseMesh:
             f.write("\n")
             _write_nodes_data(f, self.node_sets, len(self.nodes))
 
-    def plot(
-        self, show=True, show_sets: bool = False, show_edges: bool = True, **kwargs
-    ) -> pv.Plotter:
-        """
-        Visualiza la malla usando PyVista.
+    def plot(self, *args, **kwargs) -> pv.Plotter:
+        self.shell_mesh()
+        return plot_mesh(self)
 
-        Parámetros:
+    def _triangulate_mesh(self) -> None:
+        """
+        Converts all quadrilateral elements into triangles while preserving the element sets and mesh structure.
+
+        Parameters:
         -----------
-        show_sets : bool, opcional
-            Muestra los conjuntos de nodos y elementos como datos escalares.
-        show_edges : bool, opcional
-            Muestra las aristas de los elementos.
-        **kwargs : dict
-            Argumentos adicionales para pyvista.Plotter.
+        mesh : PyNuMADMesh
+            The mesh object containing the quadrilateral elements to be converted into triangles. This mesh should
+            contain elements of type quadrilateral (4 nodes) which will be transformed into two triangles (3 nodes each).
 
-        Retorna:
+        Returns:
         --------
-        pyvista.Plotter
-            Objeto plotter de PyVista con la malla cargada.
+        PyNuMADMesh
+            A new PyNuMADMesh object where all quadrilateral elements are converted into 3-node triangle elements.
+            The mesh structure is preserved, including the element sets and node associations.
+
+        Notes:
+        ------
+        This function is useful when triangularization is required for compatibility with certain solvers or when
+        simplifying the mesh. It ensures that:
+        - The mesh's structural integrity is maintained during the conversion process.
+        - Element sets (i.e., groups of elements) are updated to reflect the new triangular elements.
+        - Node associations are correctly adjusted for the newly created triangular elements.
         """
-        if not hasattr(self, "nodes") or not hasattr(self, "elements_class"):
-            raise ValueError("La malla no contiene nodos o elementos válidos.")
+        triangles = []
+        el_id = 0
+        elements_map = {}
+        mesh = self.mesh.copy()
+        with Progress() as progress:
+            triangulate_task = progress.add_task(
+                "Triangulating quad elements", total=len(mesh["elements"])
+            )
+            for i, element in enumerate(mesh["elements"]):
+                if len(element) == 4 and element[3] != -1:
+                    node0, node1, node2, node3 = element
+                    first_triangle = [node0, node1, node2]
+                    second_triangle = [node0, node2, node3]
+                    elements_map[i] = ((el_id, first_triangle), (el_id + 1, second_triangle))
+                    el_id += 2
+                elif len(element) == 4 and element[3] == -1:
+                    elements_map[i] = [(el_id, element[0:3])]
+                    el_id += 1
+                progress.update(triangulate_task, advance=1)
 
-        try:
-            if len(self.nodes) == 0:
-                raise ValueError("La malla no contiene nodos.")
+            elements = []
+            update_elements_map_task = progress.add_task(
+                "Updating elements map", total=len(elements_map.values())
+            )
+            for triangles in elements_map.values():
+                for _, triangle in triangles:
+                    elements.append([int(i) for i in triangle])
+                progress.update(update_elements_map_task, advance=1)
 
-            cells = []
-            cell_types = []
+            mesh["elements"] = np.array(elements)
 
-            for el_type, el_ids in self.elements_class.items():
-                if not el_ids:
+            update_mesh_sets_task = progress.add_task(
+                "Updating elements sets", total=len(mesh["sets"]["element"])
+            )
+            for elset in mesh["sets"]["element"]:
+                new_labels = []
+                for id in elset["labels"]:
+                    el = elements_map[id]
+                    new_labels.extend([l[0] for l in el])
+                elset["labels"] = new_labels
+                progress.update(update_mesh_sets_task, advance=1)
+
+        self._mesh = mesh
+
+    def _add_mid_nodes(self) -> None:
+        """
+        Converts shell elements (triangular) into quadratic elements by adding mid-edge nodes and ensures
+        the correct orientation of the normal vectors.
+
+        Parameters:
+        -----------
+        mesh : PyNuMADMesh
+            The mesh object containing the shell elements (triangular) to be converted into quadratic elements.
+            The mesh must also contain the nodes and elements that will be updated with new mid-edge nodes
+            and adjusted normal orientations.
+
+        Returns:
+        --------
+        PyNuMADMesh
+            A new mesh object where 3-node triangular elements are converted into 6-node quadratic triangular
+            elements. The normal vectors of the mesh are also adjusted to ensure correct orientation.
+
+        Notes:
+        ------
+        This function is primarily used to convert linear triangular shell elements into quadratic ones.
+        The process involves adding mid-edge nodes, which are necessary for the quadratic elements.
+        Additionally, it ensures that the normal vectors of the elements are correctly oriented.
+
+        The conversion is performed by calculating the midpoints of the edges of each triangular element,
+        querying for existing nodes, and creating new nodes if necessary. If the distance between a calculated
+        midpoint and an existing node is smaller than a threshold, the existing node is reused. Otherwise,
+        a new node is added to the mesh.
+
+        This function is crucial for simulations where higher-order elements are required, improving
+        accuracy and convergence in structural and aeroelastic analyses.
+
+        **Currently, only triangular elements are supported for this operation.**
+        """
+        mesh = self.mesh.copy()
+        nodes = self.nodes.copy()
+        elements = self.elements.copy()
+        nodes_map = dict(enumerate(nodes)).copy()
+        elements_map = dict(enumerate(elements)).copy()
+
+        kdtree = KDTree(nodes)
+        with Progress() as progress:
+            task = progress.add_task("Converting Linear to Quadratic elements", total=len(elements))
+            for e_id, element in elements_map.items():
+                new_node_indices = []
+
+                if e_id in self.elements_class[Elements.TRIANGLE]:
+                    if len(element) == 3:
+                        n1, n2, n3 = [int(i) for i in element]
+                    else:
+                        n1, n2, n3, _ = [int(i) for i in element]
+
+                    mids = np.array(
+                        [
+                            (nodes_map[n1] + nodes_map[n2]) / 2,
+                            (nodes_map[n2] + nodes_map[n3]) / 2,
+                            (nodes_map[n3] + nodes_map[n1]) / 2,
+                        ]
+                    )
+                elif e_id in self.elements_class[Elements.QUAD]:
+                    n1, n2, n3, n4 = [int(i) for i in element]
+
+                    mids = np.array(
+                        [
+                            (nodes_map[n1] + nodes_map[n2]) / 2,
+                            (nodes_map[n2] + nodes_map[n3]) / 2,
+                            (nodes_map[n3] + nodes_map[n4]) / 2,
+                            (nodes_map[n4] + nodes_map[n1]) / 2,
+                        ]
+                    )
+                else:
                     continue
 
-                valid_elements = [
-                    [n for n in self.elements[el_id] if n != -1]
-                    for el_id in el_ids
-                    if el_id in self.elements
-                ]
+                distance, mid_idxs = kdtree.query(mids)
+                for i, mid in enumerate(mid_idxs):
+                    if distance[i] < 1e-6:
+                        new_node_indices.append(mid)
+                    else:
+                        new_node_index = len(nodes_map)
+                        nodes_map[new_node_index] = mids[i]
+                        new_node_indices.append(new_node_index)
 
-                for element in valid_elements:
-                    cells.append([len(element)] + element)
-                    cell_types.append(ELEMENTS_TO_VTK.get(el_type, None))
+                if distance.any() < 1e-6:
+                    kdtree = KDTree(np.array(list(nodes_map.values())))
 
-            if cells and all(t is not None for t in cell_types):
-                cells = np.hstack(cells).astype(np.int64)
-                cell_types = np.array(cell_types, dtype=np.uint8)
-            else:
-                raise ValueError("No se encontraron elementos válidos para visualizar.")
+                if e_id in self.elements_class[Elements.TRIANGLE]:
+                    elements_map[e_id] = np.array([n1, n2, n3, -1, *new_node_indices, -1])
+                else:
+                    elements_map[e_id] = np.array([n1, n2, n3, n4, *new_node_indices])
 
-            points = np.array(self.nodes, dtype=np.float64)
-            grid = pv.UnstructuredGrid(cells, cell_types, points)
+                progress.update(task, advance=1)
 
-            if show_sets:
-                node_regions = np.full(len(self.nodes), -1, dtype=int)
-                for i, nodes in enumerate(self.node_sets.values()):
-                    node_regions[nodes] = i
-                grid.point_data["Node Sets"] = node_regions
-
-                cell_regions = np.full(len(cell_types), -1, dtype=int)
-                for i, elements in enumerate(self.element_sets.values()):
-                    cell_regions[elements] = i
-                grid.cell_data["Element Sets"] = cell_regions
-
-            plotter = pv.Plotter(**kwargs)
-            plotter.add_mesh(
-                grid,
-                show_edges=show_edges,
-                edge_color="black",
-                color="white",
-                opacity=0.8,
-                scalars="Node Sets" if show_sets else None,
-                render_lines_as_tubes=False,
-            )
-
-            if show_sets:
-                plotter.add_scalar_bar(
-                    title="Node Sets",
-                    n_labels=len(self.node_sets),
-                    italic=False,
-                    bold=True,
-                    title_font_size=20,
-                    label_font_size=16,
-                    color="black",
-                )
-
-            if show:
-                plotter.show()
-
-            return plotter
-
-        except ImportError:
-            raise ImportError("PyVista no está instalado. Instálalo con: pip install pyvista")
-        except Exception as e:
-            raise RuntimeError(f"Error al generar la visualización: {e}")
+        mesh["nodes"] = np.array(list(nodes_map.values()))
+        mesh["elements"] = np.array(list(elements_map.values()))
+        self._mesh = mesh
 
 
-class SquareShapeMesh:
+class SquareShapeMesh(BaseMesh):
     """
     A class for generating and visualizing structured quadrilateral meshes.
 
@@ -505,7 +610,15 @@ class SquareShapeMesh:
         Mesh dimension, dim = 2.
     """
 
-    def __init__(self, width: float, height: float, nx: int, ny: int):
+    def __init__(
+        self,
+        width: float,
+        height: float,
+        nx: int,
+        ny: int,
+        use_quadratic_elements: bool = True,
+        enforce_triangular_elements: bool = False,
+    ):
         """
         Initializes the mesh generator with domain dimensions and discretization parameters.
 
@@ -520,65 +633,76 @@ class SquareShapeMesh:
         ny : int
             Number of elements along the y-direction.
         """
+        super().__init__(use_quadratic_elements, enforce_triangular_elements)
         self.dim = 2  # 2D mesh
         self.width = width
         self.height = height
         self.nx = nx
         self.ny = ny
-        self.nodes = None
-        self.elements = None
-        self.generate_mesh()
 
-    def generate_mesh(self):
+    def shell_mesh(self):
         """
-        Generates the quadrilateral mesh.
+        Genera una malla de elementos cuadriláteros con:
+        - Aspect ratio 1 para todos los elementos
+        - Centrada horizontalmente en (0,0)
+        - Orientación de nodos siguiendo regla de la mano derecha
+        - Normal apuntando hacia fuera de la pantalla (eje Z+)
         """
-        x = np.linspace(0, self.width, self.nx + 1)
+        # Ajustar coordenadas para centrado horizontal
+        x = np.linspace(-self.width / 2, self.width / 2, self.nx + 1)
         y = np.linspace(0, self.height, self.ny + 1)
         X, Y = np.meshgrid(x, y)
-        self.nodes = np.column_stack([X.ravel(), Y.ravel()])
 
+        # Almacenar nodos
+        self._mesh["nodes"] = np.column_stack([X.ravel(), Y.ravel(), np.zeros_like(X.ravel())])
+
+        # Crear elementos con orientación correcta
         elements = []
         for j in range(self.ny):
             for i in range(self.nx):
-                n1 = j * (self.nx + 1) + i
-                n2 = n1 + 1
-                n3 = n1 + (self.nx + 1)
-                n4 = n3 + 1
-                elements.append([n1, n2, n4, n3])
+                # Nodos base
+                n0 = j * (self.nx + 1) + i
+                n1 = n0 + 1
+                n3 = (j + 1) * (self.nx + 1) + i
+                n2 = n3 + 1
 
-        self.elements = np.array(elements, dtype=int)
+                # Orden correcto para normal hacia afuera (regla mano derecha)
+                elements.append([n0, n1, n2, n3])
 
-    def plot(self):
-        """
-        Plots the generated mesh.
-        """
-        fig, ax = plt.subplots()
-        for element in self.elements:
-            polygon = self.nodes[element]
-            polygon = np.vstack([polygon, polygon[0]])  # Close the quadrilateral
-            ax.plot(polygon[:, 0], polygon[:, 1], "k")
+        self._mesh["elements"] = np.array(elements, dtype=np.int32)
 
-        ax.set_xlabel("X")
-        ax.set_ylabel("Y")
-        ax.set_title("Quadrilateral Mesh")
-        ax.set_aspect("equal")
-        plt.show()
+        # Crear sets de nodos
+        nodes = self._mesh["nodes"]
+        y_coords = nodes[:, 1]
 
-    @property
-    def num_nodes(self):
-        return self.nodes.shape[0]
+        # Set de todos los nodos
+        self._mesh["sets"]["node"].append({"name": "All", "labels": list(range(nodes.shape[0]))})
 
-    @property
-    def x(self):
-        return self.nodes[:, 0]
+        # Nodos raíz (y = 0)
+        root_nodes = np.where(y_coords < 1e-6)[0]
+        self._mesh["sets"]["node"].append({"name": "RootNodes", "labels": root_nodes.tolist()})
 
-    @property
-    def y(self):
-        return self.nodes[:, 1]
+        # Superficie (todos excepto raíz)
+        surface_nodes = np.setdiff1d(np.arange(nodes.shape[0]), root_nodes)
+        self._mesh["sets"]["node"].append({"name": "Surface", "labels": surface_nodes.tolist()})
+
+        # Post-procesamiento opcional
+        if self._enforce_triangular_elements:
+            self._triangulate_mesh()
+
+        if self._qudratic_elements:
+            self._add_mid_nodes()
 
     @classmethod
-    def create_rectangle(cls, width: float, height: float, nx: int, ny: int):
+    def create_rectangle(
+        cls,
+        width: float,
+        height: float,
+        nx: int,
+        ny: int,
+        use_quadratic_elements: bool = True,
+        enforce_triangular_elements: bool = False,
+    ):
         """
         Creates a quadrilateral mesh for a rectangular domain.
 
@@ -598,10 +722,23 @@ class SquareShapeMesh:
         MeshGenerator
             An instance of MeshGenerator with the specified parameters.
         """
-        return cls(width, height, nx, ny)
+        return cls(
+            width,
+            height,
+            nx,
+            ny,
+            use_quadratic_elements,
+            enforce_triangular_elements,
+        )
 
     @classmethod
-    def create_unit_square(cls, nx: int, ny: int):
+    def create_unit_square(
+        cls,
+        nx: int,
+        ny: int,
+        use_quadratic_elements: bool = True,
+        enforce_triangular_elements: bool = False,
+    ):
         """
         Creates a quadrilateral mesh for a unit square domain (1x1).
 
@@ -617,13 +754,11 @@ class SquareShapeMesh:
         MeshGenerator
             An instance of MeshGenerator with the specified parameters.
         """
-        return cls(1.0, 1.0, nx, ny)
-
-
-# Example usage
-if __name__ == "__main__":
-    mesh = SquareShapeMesh.create_rectangle(width=2.0, height=1.0, nx=4, ny=2)
-    mesh.plot()
-
-    unit_mesh = SquareShapeMesh.create_unit_square(nx=5, ny=5)
-    unit_mesh.plot()
+        return cls(
+            1.0,
+            1.0,
+            nx,
+            ny,
+            use_quadratic_elements,
+            enforce_triangular_elements,
+        )

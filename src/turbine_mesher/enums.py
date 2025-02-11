@@ -1,5 +1,7 @@
 from enum import StrEnum
 
+from pyvista.core.celltype import CellType
+
 
 class Elements(StrEnum):
     TRIANGLE = "triangle"
@@ -23,8 +25,8 @@ ELEMENTS_TO_CALCULIX = {
 }
 
 ELEMENTS_TO_VTK = {
-    Elements.TRIANGLE: 5,
-    Elements.TRIANGLE6: 22,
-    Elements.QUAD: 9,
-    Elements.QUAD8: 23,
+    Elements.TRIANGLE: CellType.TRIANGLE,
+    Elements.TRIANGLE6: CellType.QUADRATIC_TRIANGLE,
+    Elements.QUAD: CellType.QUAD,
+    Elements.QUAD8: CellType.QUADRATIC_QUAD,
 }

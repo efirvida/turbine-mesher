@@ -2,10 +2,7 @@ from typing import Self
 
 import numpy as np
 import pynumad as pynu
-from rich.progress import Progress
-from scipy.spatial import KDTree
 
-from turbine_mesher.enums import Elements
 from turbine_mesher.mesh import BaseMesh
 from turbine_mesher.types import PyNuMADBlade
 
@@ -80,13 +77,11 @@ class Blade(BaseMesh):
         to create the appropriate mesh for the blade geometry. The type of elements (linear or quadratic) is determined
         by the `use_quadratic_elements` flag.
         """
-        super().__init__()
+        super().__init__(use_quadratic_elements, enforce_triangular_elements)
 
         self._yaml = yaml_file
         self._blade = pynu.Blade(yaml_file)
         self._blade.update_blade()
-        self._qudratic_elements = use_quadratic_elements
-        self._enforce_triangular_elements = enforce_triangular_elements
 
         self._mesh_element_size = element_size
 
@@ -144,10 +139,10 @@ class Blade(BaseMesh):
             self._blade, adhes, self._mesh_element_size
         )
         if self._enforce_triangular_elements:
-            self.__triangulate_mesh()
+            self._triangulate_mesh()
 
         if self._qudratic_elements:
-            self.__add_mid_nodes()
+            self._add_mid_nodes()
 
         web_elements = [
             eset for eset in self._mesh["sets"]["element"] if "allShearWebEls" in eset["name"]
@@ -177,167 +172,3 @@ class Blade(BaseMesh):
             }
         )
         return self
-
-    def __triangulate_mesh(self) -> None:
-        """
-        Converts all quadrilateral elements into triangles while preserving the element sets and mesh structure.
-
-        Parameters:
-        -----------
-        mesh : PyNuMADMesh
-            The mesh object containing the quadrilateral elements to be converted into triangles. This mesh should
-            contain elements of type quadrilateral (4 nodes) which will be transformed into two triangles (3 nodes each).
-
-        Returns:
-        --------
-        PyNuMADMesh
-            A new PyNuMADMesh object where all quadrilateral elements are converted into 3-node triangle elements.
-            The mesh structure is preserved, including the element sets and node associations.
-
-        Notes:
-        ------
-        This function is useful when triangularization is required for compatibility with certain solvers or when
-        simplifying the mesh. It ensures that:
-        - The mesh's structural integrity is maintained during the conversion process.
-        - Element sets (i.e., groups of elements) are updated to reflect the new triangular elements.
-        - Node associations are correctly adjusted for the newly created triangular elements.
-        """
-        triangles = []
-        el_id = 0
-        elements_map = {}
-        mesh = self.mesh.copy()
-        with Progress() as progress:
-            triangulate_task = progress.add_task(
-                "Triangulating quad elements", total=len(mesh["elements"])
-            )
-            for i, element in enumerate(mesh["elements"]):
-                if len(element) == 4 and element[3] != -1:
-                    node0, node1, node2, node3 = element
-                    first_triangle = [node0, node1, node2]
-                    second_triangle = [node0, node2, node3]
-                    elements_map[i] = ((el_id, first_triangle), (el_id + 1, second_triangle))
-                    el_id += 2
-                elif len(element) == 4 and element[3] == -1:
-                    elements_map[i] = [(el_id, element[0:3])]
-                    el_id += 1
-                progress.update(triangulate_task, advance=1)
-
-            elements = []
-            update_elements_map_task = progress.add_task(
-                "Updating elements map", total=len(elements_map.values())
-            )
-            for triangles in elements_map.values():
-                for _, triangle in triangles:
-                    elements.append([int(i) for i in triangle])
-                progress.update(update_elements_map_task, advance=1)
-
-            mesh["elements"] = np.array(elements)
-
-            update_mesh_sets_task = progress.add_task(
-                "Updating elements sets", total=len(mesh["sets"]["element"])
-            )
-            for elset in mesh["sets"]["element"]:
-                new_labels = []
-                for id in elset["labels"]:
-                    el = elements_map[id]
-                    new_labels.extend([l[0] for l in el])
-                elset["labels"] = new_labels
-                progress.update(update_mesh_sets_task, advance=1)
-
-        self._mesh = mesh
-
-    def __add_mid_nodes(self) -> None:
-        """
-        Converts shell elements (triangular) into quadratic elements by adding mid-edge nodes and ensures
-        the correct orientation of the normal vectors.
-
-        Parameters:
-        -----------
-        mesh : PyNuMADMesh
-            The mesh object containing the shell elements (triangular) to be converted into quadratic elements.
-            The mesh must also contain the nodes and elements that will be updated with new mid-edge nodes
-            and adjusted normal orientations.
-
-        Returns:
-        --------
-        PyNuMADMesh
-            A new mesh object where 3-node triangular elements are converted into 6-node quadratic triangular
-            elements. The normal vectors of the mesh are also adjusted to ensure correct orientation.
-
-        Notes:
-        ------
-        This function is primarily used to convert linear triangular shell elements into quadratic ones.
-        The process involves adding mid-edge nodes, which are necessary for the quadratic elements.
-        Additionally, it ensures that the normal vectors of the elements are correctly oriented.
-
-        The conversion is performed by calculating the midpoints of the edges of each triangular element,
-        querying for existing nodes, and creating new nodes if necessary. If the distance between a calculated
-        midpoint and an existing node is smaller than a threshold, the existing node is reused. Otherwise,
-        a new node is added to the mesh.
-
-        This function is crucial for simulations where higher-order elements are required, improving
-        accuracy and convergence in structural and aeroelastic analyses.
-
-        **Currently, only triangular elements are supported for this operation.**
-        """
-        mesh = self.mesh.copy()
-        nodes = self.nodes.copy()
-        elements = self.elements.copy()
-        nodes_map = dict(enumerate(nodes)).copy()
-        elements_map = dict(enumerate(elements)).copy()
-
-        kdtree = KDTree(nodes)
-        with Progress() as progress:
-            task = progress.add_task("Converting Linear to Quadratic elements", total=len(elements))
-            for e_id, element in elements_map.items():
-                new_node_indices = []
-
-                if e_id in self.elements_class[Elements.TRIANGLE]:
-                    if len(element) == 3:
-                        n1, n2, n3 = [int(i) for i in element]
-                    else:
-                        n1, n2, n3, _ = [int(i) for i in element]
-
-                    mids = np.array(
-                        [
-                            (nodes_map[n1] + nodes_map[n2]) / 2,
-                            (nodes_map[n2] + nodes_map[n3]) / 2,
-                            (nodes_map[n3] + nodes_map[n1]) / 2,
-                        ]
-                    )
-                elif e_id in self.elements_class[Elements.QUAD]:
-                    n1, n2, n3, n4 = [int(i) for i in element]
-
-                    mids = np.array(
-                        [
-                            (nodes_map[n1] + nodes_map[n2]) / 2,
-                            (nodes_map[n2] + nodes_map[n3]) / 2,
-                            (nodes_map[n3] + nodes_map[n4]) / 2,
-                            (nodes_map[n4] + nodes_map[n1]) / 2,
-                        ]
-                    )
-                else:
-                    continue
-
-                distance, mid_idxs = kdtree.query(mids)
-                for i, mid in enumerate(mid_idxs):
-                    if distance[i] < 1e-6:
-                        new_node_indices.append(mid)
-                    else:
-                        new_node_index = len(nodes_map)
-                        nodes_map[new_node_index] = mids[i]
-                        new_node_indices.append(new_node_index)
-
-                if distance.any() < 1e-6:
-                    kdtree = KDTree(np.array(list(nodes_map.values())))
-
-                if e_id in self.elements_class[Elements.TRIANGLE]:
-                    elements_map[e_id] = np.array([n1, n2, n3, -1, *new_node_indices, -1])
-                else:
-                    elements_map[e_id] = np.array([n1, n2, n3, n4, *new_node_indices])
-
-                progress.update(task, advance=1)
-
-        mesh["nodes"] = np.array(list(nodes_map.values()))
-        mesh["elements"] = np.array(list(elements_map.values()))
-        self._mesh = mesh

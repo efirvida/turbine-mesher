@@ -50,6 +50,7 @@ packaging==24.2
     # via matplotlib
     # via plotly
     # via pooch
+    # via qtpy
 pandas==2.2.3
     # via pynumad
 pillow==11.0.0
@@ -69,21 +70,27 @@ pynumad==1.0.0
     # via turbine-mesher
 pyparsing==3.2.0
     # via matplotlib
-pyqt6==6.8.0
+pyside6==6.8.2.1
     # via turbine-mesher
-pyqt6-qt6==6.8.1
-    # via pyqt6
-pyqt6-sip==13.9.1
-    # via pyqt6
+pyside6-addons==6.8.2.1
+    # via pyside6
+pyside6-essentials==6.8.2.1
+    # via pyside6
+    # via pyside6-addons
 python-dateutil==2.9.0.post0
     # via matplotlib
     # via pandas
 pytz==2024.2
     # via pandas
 pyvista==0.44.2
+    # via pyvistaqt
+    # via turbine-mesher
+pyvistaqt==0.11.1
     # via turbine-mesher
 pyyaml==6.0.2
     # via pynumad
+qtpy==2.4.2
+    # via pyvistaqt
 requests==2.32.3
     # via pooch
 rich==13.9.4
@@ -92,6 +99,10 @@ scipy==1.14.1
     # via pynumad
 scooby==0.10.0
     # via pyvista
+shiboken6==6.8.2.1
+    # via pyside6
+    # via pyside6-addons
+    # via pyside6-essentials
 six==1.16.0
     # via python-dateutil
 tenacity==9.0.0

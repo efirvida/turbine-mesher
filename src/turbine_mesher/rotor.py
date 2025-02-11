@@ -7,7 +7,6 @@ import yaml
 from turbine_mesher.blade import Blade
 from turbine_mesher.helpers import rotate_around_y
 from turbine_mesher.mesh import BaseMesh
-from turbine_mesher.types import PyNuMADMesh
 
 __all__ = ["Rotor"]
 
@@ -21,7 +20,7 @@ class Rotor(BaseMesh):
         enforce_triangular_elements: bool = False,
         n_samples: int = 300,
     ):
-        super().__init__()
+        super().__init__(use_quadratic_elements, enforce_triangular_elements)
         self._yaml = yaml_file
         self._blade = Blade(
             yaml_file,
@@ -50,31 +49,10 @@ class Rotor(BaseMesh):
             # set default number of blades to 3 if its not defined in the YAML input file
             return 3
 
-    @property
-    def mesh(self) -> list[PyNuMADMesh]:
-        """
-        Retrieves the mesh object for the blade, generating it if it does not exist.
-
-        Returns:
-        --------
-        PyNuMADMesh
-            The mesh object representing the discretized geometry of the blade, either created on demand or retrieved
-            from the cached value.
-
-        Notes:
-        ------
-        This property checks if a mesh has already been generated (stored in `_mesh`). If not, it triggers the creation
-        of the mesh using the `__shell_mesh` method. The mesh may be generated using linear or quadratic elements depending
-        on the configuration provided to the Blade object.
-        """
-        if not self._mesh:
-            self.shell_mesh()
-        return self._mesh
-
     def shell_mesh(self) -> Self:
-        base_blade = self._blade
+        base_blade = deepcopy(self._blade)
         _ = base_blade.mesh
-        base_blade.nodes[:, 2] += self.hub_diameter / 2
+        base_blade._mesh["nodes"][:, 2] += self.hub_diameter / 2
         nodes_count = len(base_blade.nodes)
         elements_count = len(base_blade.elements)
 
@@ -82,13 +60,13 @@ class Rotor(BaseMesh):
             angle = 2 * np.pi * i / self.number_of_blades
             nodes = rotate_around_y(base_blade.nodes.copy(), angle)
             new_blade = deepcopy(base_blade)
-            new_blade.nodes[:] = nodes
+            new_blade._mesh["nodes"] = nodes
             self._blades.append(new_blade)
 
         total_nodes = base_blade.nodes.shape[0] * self.number_of_blades
         total_elements = base_blade.elements.shape[0] * self.number_of_blades
         self._mesh = {
-            "nodes": np.zeros((total_nodes, 3), dtype=np.float32),
+            "nodes": np.zeros((total_nodes, 3), dtype=np.float64),
             "elements": np.zeros((total_elements, base_blade.elements.shape[1]), dtype=np.int32),
             "sets": deepcopy(base_blade.mesh["sets"]),
             "materials": base_blade.mesh["materials"],
