@@ -190,3 +190,50 @@ def array2str(header: str, matrix: np.ndarray, footer: str = "", max_size: int =
 
     return "\n".join(table)
 
+
+def quad_area(coords: np.ndarray) -> float:
+    """
+    Compute the area of a quadrilateral element.
+
+    Supports 4-node (bilinear), 8-node (serendipity), and 9-node (Lagrange) elements.
+    The 4-node element uses the shoelace formula, while the 8-node and 9-node elements
+    are approximated by dividing them into 4 triangles.
+
+    Returns
+    -------
+    float
+        The approximate area of the quadrilateral element.
+
+    Raises
+    ------
+    ValueError
+        If `coords` does not have a valid shape.
+    """
+    if coords.shape == (4, 2):
+        x, y = coords[:, 0], coords[:, 1]
+        return 0.5 * abs(
+            x[0] * y[1]
+            + x[1] * y[2]
+            + x[2] * y[3]
+            + x[3] * y[0]
+            - (y[0] * x[1] + y[1] * x[2] + y[2] * x[3] + y[3] * x[0])
+        )
+
+    elif coords.shape in [(8, 2), (9, 2)]:
+        center = coords[8] if coords.shape == (9, 2) else coords[:4].mean(axis=0)
+
+        triangles = [
+            [coords[0], coords[1], center],
+            [coords[1], coords[2], center],
+            [coords[2], coords[3], center],
+            [coords[3], coords[0], center],
+        ]
+
+        def triangle_area(p1, p2, p3):
+            return 0.5 * abs(
+                p1[0] * (p2[1] - p3[1]) + p2[0] * (p3[1] - p1[1]) + p3[0] * (p1[1] - p2[1])
+            )
+
+        return sum(triangle_area(*tri) for tri in triangles)
+    else:
+        raise ValueError("Input array must have shape (4,2), (8,2), or (9,2).")
