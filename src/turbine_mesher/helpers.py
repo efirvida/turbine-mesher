@@ -5,6 +5,30 @@ from .enums import Elements
 from .types import PyNuMADMesh
 
 
+def gauss_legendre_quadrature(n: int):
+    """
+    Calcula los puntos y pesos de la cuadratura de Gauss-Legendre en 2D.
+
+    Parámetros:
+    -----------
+    n : int
+        Número de puntos de integración en cada dirección.
+
+    Retorna:
+    --------
+    Tuple[List[Tuple[float, float]], List[float]]
+        Lista de puntos de integración (xi, eta) y sus pesos.
+    """
+    # Obtener puntos y pesos en 1D
+    x_1d, w_1d = np.polynomial.legendre.leggauss(n)
+
+    # Producto cartesiano para obtener los puntos en 2D
+    points = list(itertools.product(x_1d, repeat=2))  # (xi, eta)
+    weights = [w1 * w2 for w1, w2 in itertools.product(w_1d, repeat=2)]
+
+    return points, weights
+
+
 def compute_triangular_element_normals(
     P1: np.ndarray, P2: np.ndarray, P3: np.ndarray, normalized: bool = True
 ) -> np.ndarray:
