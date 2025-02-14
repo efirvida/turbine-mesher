@@ -128,8 +128,65 @@ def rotate_around_y(coords, angle) -> np.ndarray:
     rotation_matrix = np.array(
         [[np.cos(angle), 0, np.sin(angle)], [0, 1, 0], [-np.sin(angle), 0, np.cos(angle)]]
     )
+def array2str(header: str, matrix: np.ndarray, footer: str = "", max_size: int = 8) -> str:
+    """
+    Versión final funcional con:
+    - Manejo correcto de tipos de datos
+    - Truncamiento estilo pandas
+    - Bordes perfectamente alineados
+    - Soporte para valores pequeños
+    """
+    matrix = np.array(matrix, dtype=object)  # Permitir mixed types
+    nrows, ncols = matrix.shape
+    cell_width = 14
+    ellipsis_str = f"{'...':^{cell_width}}"
 
-    # Apply the rotation to each node in the mesh
-    rotated_mesh = np.dot(coords, rotation_matrix.T)
+    # 1. Función para calcular índices de truncamiento
+    def get_truncated_indices(total: int, max_size: int) -> list:
+        if total <= max_size:
+            return list(range(total)), []
+        n_head = max_size // 2
+        n_tail = max_size - n_head - 1
+        return list(range(n_head)) + list(range(total - n_tail, total)), [n_head]
 
-    return rotated_mesh.copy()
+    # 2. Calcular índices para filas y columnas
+    row_idx, row_cuts = get_truncated_indices(nrows, max_size)
+    col_idx, col_cuts = get_truncated_indices(ncols, max_size)
+
+    # 3. Crear submatriz truncada
+    truncated = matrix[np.ix_(row_idx, col_idx)]
+
+    # 4. Insertar marcas de truncamiento durante el formateo
+    formatted = []
+    for i, row in enumerate(truncated):
+        # Añadir línea de truncamiento vertical
+        if i in row_cuts:
+            formatted.append([ellipsis_str] * len(col_idx))
+
+        # Formatear fila actual
+        formatted_row = []
+        for j, val in enumerate(row):
+            if j in col_cuts:
+                formatted_row.append(ellipsis_str)
+            try:
+                num = float(val)
+                formatted_row.append(
+                    f"{num:{cell_width}.3e}" if abs(num) > 1e-10 else " " * cell_width
+                )
+            except:
+                formatted_row.append(f"{str(val):^{cell_width}}")
+        formatted.append(formatted_row)
+
+    # 5. Construir tabla
+    ncols_final = len(formatted[0])
+    border = "+" + "+".join(["-" * (cell_width + 2)] * ncols_final) + "+"
+    h_border = border.replace("-", "=").replace(" ", "")
+
+    table = [h_border, f"|{header:^{len(border) - 2}}|", h_border]
+    for row in formatted:
+        table.append("| " + " | ".join(row) + " |")
+        table.append(border)
+    table[-1] = h_border
+
+    return "\n".join(table)
+
