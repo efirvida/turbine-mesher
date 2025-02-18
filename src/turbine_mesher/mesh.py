@@ -590,7 +590,7 @@ class BaseMesh:
 
 class SquareShapeMesh(BaseMesh):
     """
-    A class for generating and visualizing structured quadrilateral meshes.
+    A class for generating quadrilateral/triangular meshes using Gmsh.
 
     Attributes
     ----------
@@ -616,82 +616,127 @@ class SquareShapeMesh(BaseMesh):
         height: float,
         nx: int,
         ny: int,
-        use_quadratic_elements: bool = True,
-        enforce_triangular_elements: bool = False,
+        quadratic: bool = True,
+        triangular: bool = False,
     ):
-        """
-        Initializes the mesh generator with domain dimensions and discretization parameters.
-
-        Parameters
-        ----------
-        width : float
-            Width of the domain.
-        height : float
-            Height of the domain.
-        nx : int
-            Number of elements along the x-direction.
-        ny : int
-            Number of elements along the y-direction.
-        """
-        super().__init__(use_quadratic_elements, enforce_triangular_elements)
-        self.dim = 2  # 2D mesh
+        super().__init__(quadratic, triangular)
+        self.dim = 2
         self.width = width
         self.height = height
         self.nx = nx
         self.ny = ny
 
     def shell_mesh(self):
-        """
-        Genera una malla de elementos cuadriláteros con:
-        - Aspect ratio 1 para todos los elementos
-        - Centrada horizontalmente en (0,0)
-        - Orientación de nodos siguiendo regla de la mano derecha
-        - Normal apuntando hacia fuera de la pantalla (eje Z+)
-        """
-        # Ajustar coordenadas para centrado horizontal
-        x = np.linspace(-self.width / 2, self.width / 2, self.nx + 1)
-        y = np.linspace(0, self.height, self.ny + 1)
-        X, Y = np.meshgrid(x, y)
+        """Generates the mesh using Gmsh with specified parameters"""
+        gmsh.initialize()
+        try:
+            gmsh.option.setNumber("General.Terminal", 0)
+            gmsh.option.setNumber("General.Verbosity", 0)
+            gmsh.model.add("rectangle")
 
-        # Almacenar nodos
-        self._mesh["nodes"] = np.column_stack([X.ravel(), Y.ravel(), np.zeros_like(X.ravel())])
+            # Create geometry
+            x0 = -self.width / 2
+            x1 = self.width / 2
+            y0 = 0.0
+            y1 = self.height
 
-        # Crear elementos con orientación correcta
-        elements = []
-        for j in range(self.ny):
-            for i in range(self.nx):
-                # Nodos base
-                n0 = j * (self.nx + 1) + i
-                n1 = n0 + 1
-                n3 = (j + 1) * (self.nx + 1) + i
-                n2 = n3 + 1
+            # Add points
+            p1 = gmsh.model.geo.addPoint(x0, y0, 0)
+            p2 = gmsh.model.geo.addPoint(x1, y0, 0)
+            p3 = gmsh.model.geo.addPoint(x1, y1, 0)
+            p4 = gmsh.model.geo.addPoint(x0, y1, 0)
 
-                # Orden correcto para normal hacia afuera (regla mano derecha)
-                elements.append([n0, n1, n2, n3])
+            # Create boundary lines
+            bottom = gmsh.model.geo.addLine(p1, p2)
+            right = gmsh.model.geo.addLine(p2, p3)
+            top = gmsh.model.geo.addLine(p3, p4)
+            left = gmsh.model.geo.addLine(p4, p1)
 
-        self._mesh["elements"] = np.array(elements, dtype=np.int32)
+            # Create surface
+            loop = gmsh.model.geo.addCurveLoop([bottom, right, top, left])
+            surface = gmsh.model.geo.addPlaneSurface([loop])
 
-        # Crear sets de nodos
-        nodes = self._mesh["nodes"]
-        y_coords = nodes[:, 1]
+            # Set physical groups for boundaries
+            gmsh.model.addPhysicalGroup(1, [top], name="top")
+            gmsh.model.addPhysicalGroup(1, [bottom], name="bottom")
+            gmsh.model.addPhysicalGroup(1, [left], name="left")
+            gmsh.model.addPhysicalGroup(1, [right], name="right")
+            gmsh.model.addPhysicalGroup(2, [surface], name="domain")
 
-        # Set de todos los nodos
-        self._mesh["sets"]["node"].append({"name": "All", "labels": list(range(nodes.shape[0]))})
+            # Configure mesh
+            gmsh.model.geo.mesh.setTransfiniteCurve(bottom, self.nx + 1)
+            gmsh.model.geo.mesh.setTransfiniteCurve(top, self.nx + 1)
+            gmsh.model.geo.mesh.setTransfiniteCurve(left, self.ny + 1)
+            gmsh.model.geo.mesh.setTransfiniteCurve(right, self.ny + 1)
+            gmsh.model.geo.mesh.setTransfiniteSurface(surface, "Right", [p1, p2, p3, p4])
 
-        # Nodos raíz (y = 0)
-        root_nodes = np.where(y_coords < 1e-6)[0]
-        self._mesh["sets"]["node"].append({"name": "RootNodes", "labels": root_nodes.tolist()})
+            if self._triangular_elements:
+                gmsh.option.setNumber("Mesh.Algorithm", 6)
+            else:
+                gmsh.option.setNumber("Mesh.RecombineAll", 1)
+                gmsh.option.setNumber("Mesh.Algorithm", 8)
 
-        # Superficie (todos excepto raíz)
-        surface_nodes = np.setdiff1d(np.arange(nodes.shape[0]), root_nodes)
-        self._mesh["sets"]["node"].append({"name": "Surface", "labels": surface_nodes.tolist()})
+            if self._quadratic_elements:
+                gmsh.option.setNumber("Mesh.ElementOrder", 2)
 
-        # Post-procesamiento opcional
-        if self._enforce_triangular_elements:
-            self._triangulate_mesh()
+            # Generate mesh
+            gmsh.model.geo.synchronize()
+            gmsh.model.mesh.generate(2)
 
-        if self._qudratic_elements:
-            self._add_mid_nodes()
+            node_tags, coords, _ = gmsh.model.mesh.getNodes()
+            nodes_array = np.array(coords, dtype=np.float64).reshape(-1, 3)
+            self._mesh["nodes"] = nodes_array
+
+            elem_types = gmsh.model.mesh.getElementTypes()
+            elements = []
+            for elem_type in elem_types:
+                element_properties = gmsh.model.mesh.getElementProperties(elem_type)
+                if element_properties[1] == 2:  # Verifica si la dimensión del elemento es 2
+                    _, node_tags_elem = gmsh.model.mesh.getElementsByType(elem_type)
+                    elements.append(node_tags_elem.reshape(-1, element_properties[3]))
+
+            self._mesh["elements"] = np.array(elements[0], dtype=np.int32) - 1
+
+            self._create_node_sets(gmsh)
+        finally:
+            gmsh.finalize()
+        return self
+
+    def _create_node_sets(self, gmsh):
+        """Extracts node sets from Gmsh physical groups"""
+        physical_groups = gmsh.model.getPhysicalGroups()
+        node_sets = {}
+
+        for dim, tag in physical_groups:
+            if dim == 1:  # Boundary curves
+                name = gmsh.model.getPhysicalName(dim, tag)
+                nodes = []
+                entities = gmsh.model.getEntitiesForPhysicalGroup(dim, tag)
+                for e in entities:
+                    node_tags, _, _ = gmsh.model.mesh.getNodes(dim=1, tag=e)
+                    nodes.extend([nt - 1 for nt in node_tags])
+                node_sets[name] = nodes
+
+        # Get all nodes in the mesh
+        all_nodes = set(range(self._mesh["nodes"].shape[0]))
+
+        # Get boundary nodes
+        boundary_nodes = set()
+        for boundary in ["top", "bottom", "left", "right"]:
+            boundary_nodes.update(node_sets.get(boundary, []))
+
+        # Surface nodes are all nodes except boundary nodes
+        surface_nodes = list(all_nodes - boundary_nodes)
+
+        # Store all sets
+        self._mesh.setdefault("sets", {})["node"] = [
+            {"name": "all", "labels": list(all_nodes)},
+            {"name": "top", "labels": node_sets.get("top", [])},
+            {"name": "bottom", "labels": node_sets.get("bottom", [])},
+            {"name": "left", "labels": node_sets.get("left", [])},
+            {"name": "right", "labels": node_sets.get("right", [])},
+            {"name": "surface", "labels": surface_nodes},
+        ]
 
     @classmethod
     def create_rectangle(
@@ -700,65 +745,17 @@ class SquareShapeMesh(BaseMesh):
         height: float,
         nx: int,
         ny: int,
-        use_quadratic_elements: bool = True,
-        enforce_triangular_elements: bool = False,
+        quadratic: bool = True,
+        triangular: bool = False,
     ):
-        """
-        Creates a quadrilateral mesh for a rectangular domain.
-
-        Parameters
-        ----------
-        width : float
-            Width of the rectangle.
-        height : float
-            Height of the rectangle.
-        nx : int
-            Number of elements along the x-axis.
-        ny : int
-            Number of elements along the y-axis.
-
-        Returns
-        -------
-        MeshGenerator
-            An instance of MeshGenerator with the specified parameters.
-        """
-        return cls(
-            width,
-            height,
-            nx,
-            ny,
-            use_quadratic_elements,
-            enforce_triangular_elements,
-        )
+        return cls(width, height, nx, ny, quadratic, triangular)
 
     @classmethod
     def create_unit_square(
         cls,
         nx: int,
         ny: int,
-        use_quadratic_elements: bool = True,
-        enforce_triangular_elements: bool = False,
+        quadratic: bool = True,
+        triangular: bool = False,
     ):
-        """
-        Creates a quadrilateral mesh for a unit square domain (1x1).
-
-        Parameters
-        ----------
-        nx : int
-            Number of elements along the x-axis.
-        ny : int
-            Number of elements along the y-axis.
-
-        Returns
-        -------
-        MeshGenerator
-            An instance of MeshGenerator with the specified parameters.
-        """
-        return cls(
-            1.0,
-            1.0,
-            nx,
-            ny,
-            use_quadratic_elements,
-            enforce_triangular_elements,
-        )
+        return cls(1.0, 1.0, nx, ny, quadratic, triangular)
