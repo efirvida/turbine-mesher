@@ -1,12 +1,13 @@
 import os
-from typing import Dict, List, Self, Set
+from typing import Dict, List, Self
 
+import gmsh
 import numpy as np
 import pyvista as pv
 from rich.progress import Progress
 from scipy.spatial import KDTree
 
-from .enums import ELEMENTS_TO_CALCULIX, ELEMENTS_TO_VTK, Elements
+from .enums import ELEMENTS_TO_CALCULIX, ELEMENTS_TO_VTK, ElementsTypes
 from .helpers import get_element_type_from_numad
 from .types import PyNuMADMesh
 from .viewer import plot_mesh
@@ -15,11 +16,11 @@ from .viewer import plot_mesh
 class BaseMesh:
     def __init__(
         self,
-        use_quadratic_elements: bool = True,
-        enforce_triangular_elements: bool = False,
+        quadratic: bool = True,
+        triangular: bool = False,
     ) -> None:
-        self._qudratic_elements = use_quadratic_elements
-        self._enforce_triangular_elements = enforce_triangular_elements
+        self._quadratic_elements = quadratic
+        self._triangular_elements = triangular
 
         self._mesh = {
             "nodes": [],
@@ -49,33 +50,25 @@ class BaseMesh:
         of the mesh using the `__shell_mesh` method. The mesh may be generated using linear or quadratic elements depending
         on the configuration provided to the Blade object.
         """
-        if len(self._mesh["nodes"]):
-            return self._mesh
-        self.shell_mesh()
+        if not len(self._mesh["nodes"]):
+            self.shell_mesh()
+        return self._mesh
 
     @property
     def num_nodes(self):
         return self.nodes.shape[0]
 
     @property
-    def x(self):
-        return self.nodes[:, 0]
-
-    @property
-    def y(self):
-        return self.nodes[:, 1]
-
-    @property
-    def z(self):
-        return self.nodes[:, 2]
-
-    @property
     def nodes(self) -> np.ndarray:
-        return np.array(self.mesh["nodes"], dtype=np.float64)
+        return self.mesh["nodes"]
 
     @property
     def elements(self) -> np.ndarray:
-        return np.array(self.mesh["elements"], dtype=np.int32)
+        return self.mesh["elements"]
+
+    @property
+    def elements_map(self) -> dict[int, List[int]]:
+        return {i: [e for e in el if e != -1] for i, el in enumerate(self.mesh["elements"])}
 
     @property
     def element_sets(self) -> Dict[str, List[int]]:
@@ -85,21 +78,13 @@ class BaseMesh:
     def node_sets(self) -> Dict[str, List[int]]:
         return {node_set["name"]: node_set["labels"] for node_set in self.mesh["sets"]["node"]}
 
-    def get_element_sets(self, element_id) -> Set:
-        return {
-            set_name for set_name, elements in self.element_sets.items() if element_id in elements
-        }
-
-    def get_node_sets(self, node_id) -> Set:
-        return {set_name for set_name, nodes in self.node_sets.items() if node_id in nodes}
-
     @property
-    def elements_class(self) -> Dict[Elements, List[int]]:
-        elements_map = {el_type: [] for el_type in ELEMENTS_TO_CALCULIX}
+    def elements_class(self) -> Dict[ElementsTypes, List[int]]:
+        elements_map = {el_type: [] for el_type in ElementsTypes.__members__}
         for el_id, element in enumerate(self.elements):
             el_type = get_element_type_from_numad(element)
-            if el_type in elements_map:
-                elements_map[el_type].append(el_id)
+            if el_type.name in elements_map:
+                elements_map[el_type.name].append(el_id)
         return elements_map
 
     def write_mesh(self, output_file: str) -> None:
@@ -419,7 +404,7 @@ class BaseMesh:
             f.write("\n")
             _write_nodes_data(f, self.node_sets, len(self.nodes))
 
-    def plot(self, *args, **kwargs) -> pv.Plotter:
+    def view(self, *args, **kwargs) -> pv.Plotter:
         self.shell_mesh()
         return plot_mesh(self)
 
@@ -537,7 +522,7 @@ class BaseMesh:
             for e_id, element in elements_map.items():
                 new_node_indices = []
 
-                if e_id in self.elements_class[Elements.TRIANGLE]:
+                if e_id in self.elements_class[ElementsTypes.TRIANGLE]:
                     if len(element) == 3:
                         n1, n2, n3 = [int(i) for i in element]
                     else:
@@ -550,7 +535,7 @@ class BaseMesh:
                             (nodes_map[n3] + nodes_map[n1]) / 2,
                         ]
                     )
-                elif e_id in self.elements_class[Elements.QUAD]:
+                elif e_id in self.elements_class[ElementsTypes.QUAD]:
                     n1, n2, n3, n4 = [int(i) for i in element]
 
                     mids = np.array(
@@ -576,7 +561,7 @@ class BaseMesh:
                 if distance.any() < 1e-6:
                     kdtree = KDTree(np.array(list(nodes_map.values())))
 
-                if e_id in self.elements_class[Elements.TRIANGLE]:
+                if e_id in self.elements_class[ElementsTypes.TRIANGLE]:
                     elements_map[e_id] = np.array([n1, n2, n3, -1, *new_node_indices, -1])
                 else:
                     elements_map[e_id] = np.array([n1, n2, n3, n4, *new_node_indices])

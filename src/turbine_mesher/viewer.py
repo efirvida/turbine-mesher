@@ -300,7 +300,11 @@ class MeshViewer(QWidget):
                     self.plotter.add_mesh(grid, name="surface", **style)
 
             # Set view orientation
-            self.plotter.view_xy() if self.is_2D_mesh else self.plotter.view_xz()
+            if self.is_2D_mesh:
+                self.plotter.view_xy()
+                self.plotter.enable_image_style()
+            else:
+                self.plotter.view_xz()
 
             # Finalize plot
             light = pv.Light(position=(0, 0, 1), light_type="camera light")
