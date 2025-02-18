@@ -16,17 +16,17 @@ class Rotor(BaseMesh):
         self,
         yaml_file: str,
         element_size: float = 0.5,
-        use_quadratic_elements: bool = True,
-        enforce_triangular_elements: bool = False,
+        quadratic: bool = True,
+        triangular: bool = False,
         n_samples: int = 300,
     ):
-        super().__init__(use_quadratic_elements, enforce_triangular_elements)
+        super().__init__(quadratic, triangular)
         self._yaml = yaml_file
         self._blade = Blade(
             yaml_file,
             element_size=element_size,
-            use_quadratic_elements=use_quadratic_elements,
-            enforce_triangular_elements=enforce_triangular_elements,
+            quadratic=quadratic,
+            triangular=triangular,
             n_samples=n_samples,
         )
         self._blades = []
@@ -96,7 +96,7 @@ class Rotor(BaseMesh):
             for i in range(self.number_of_blades):
                 extended_node_set.append(
                     {
-                        "name": f"{node_set["name"]}_Blade{i + 1}",
+                        "name": f"{node_set['name']}_Blade{i + 1}",
                         "labels": (labels + i * nodes_count).tolist(),
                     }
                 )
@@ -108,7 +108,7 @@ class Rotor(BaseMesh):
             for i in range(self.number_of_blades):
                 extended_element_set.append(
                     {
-                        "name": f"{el_set["name"]}_Blade{i + 1}",
+                        "name": f"{el_set['name']}_Blade{i + 1}",
                         "labels": (labels + i * elements_count).tolist(),
                     }
                 )

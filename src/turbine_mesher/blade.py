@@ -44,8 +44,8 @@ class Blade(BaseMesh):
         self,
         yaml_file: str,
         element_size: float = 0.5,
-        use_quadratic_elements: bool = True,
-        enforce_triangular_elements: bool = False,
+        quadratic: bool = True,
+        triangular: bool = False,
         n_samples: int = 300,
     ):
         """
@@ -77,7 +77,7 @@ class Blade(BaseMesh):
         to create the appropriate mesh for the blade geometry. The type of elements (linear or quadratic) is determined
         by the `use_quadratic_elements` flag.
         """
-        super().__init__(use_quadratic_elements, enforce_triangular_elements)
+        super().__init__(quadratic, triangular)
 
         self._yaml = yaml_file
         self._blade = pynu.Blade(yaml_file)
@@ -138,10 +138,10 @@ class Blade(BaseMesh):
         self._mesh = pynu.mesh_gen.mesh_gen.get_shell_mesh(
             self._blade, adhes, self._mesh_element_size
         )
-        if self._enforce_triangular_elements:
+        if self._triangular_elements:
             self._triangulate_mesh()
 
-        if self._qudratic_elements:
+        if self._quadratic_elements:
             self._add_mid_nodes()
 
         web_elements = [
