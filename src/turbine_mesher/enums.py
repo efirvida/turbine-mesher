@@ -3,11 +3,12 @@ from enum import StrEnum
 from pyvista.core.celltype import CellType
 
 
-class Elements(StrEnum):
+class ElementsTypes(StrEnum):
     TRIANGLE = "triangle"
     TRIANGLE6 = "triangle6"
     QUAD = "quad"
     QUAD8 = "quad8"
+    QUAD9 = "quad9"
 
 
 class CalculiXElementTypes(StrEnum):
@@ -18,15 +19,16 @@ class CalculiXElementTypes(StrEnum):
 
 
 ELEMENTS_TO_CALCULIX = {
-    Elements.TRIANGLE: CalculiXElementTypes.TRIANGLE,
-    Elements.TRIANGLE6: CalculiXElementTypes.TRIANGLE6,
-    Elements.QUAD: CalculiXElementTypes.QUAD,
-    Elements.QUAD8: CalculiXElementTypes.QUAD8,
+    ElementsTypes.TRIANGLE: CalculiXElementTypes.TRIANGLE,
+    ElementsTypes.TRIANGLE6: CalculiXElementTypes.TRIANGLE6,
+    ElementsTypes.QUAD: CalculiXElementTypes.QUAD,
+    ElementsTypes.QUAD8: CalculiXElementTypes.QUAD8,
 }
 
 ELEMENTS_TO_VTK = {
-    Elements.TRIANGLE: CellType.TRIANGLE,
-    Elements.TRIANGLE6: CellType.QUADRATIC_TRIANGLE,
-    Elements.QUAD: CellType.QUAD,
-    Elements.QUAD8: CellType.QUADRATIC_QUAD,
+    ElementsTypes.TRIANGLE: CellType.TRIANGLE,
+    ElementsTypes.TRIANGLE6: CellType.QUADRATIC_TRIANGLE,
+    ElementsTypes.QUAD: CellType.QUAD,
+    ElementsTypes.QUAD8: CellType.QUADRATIC_QUAD,
+    ElementsTypes.QUAD9: CellType.LAGRANGE_QUADRILATERAL,
 }
