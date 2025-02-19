@@ -183,11 +183,12 @@ class FemModel(FEA):
             # Mapear los DOF locales a los globales
             nodes = np.array(element)
             global_dofs = np.empty(el.dofs_per_node * len(element))
+            global_dofs = global_dofs.astype(np.int32)
             for i in range(el.dofs_per_node):
                 global_dofs[i :: el.dofs_per_node] = el.dofs_per_node * nodes + i
 
             # Sumar la contribución elemental al vector global
-            f_global[global_dofs] += Fe
+            f_global[global_dofs.astype(int)] += Fe
 
         self._f = f_global
 
@@ -468,7 +469,10 @@ class FemModelPETSc(FEA):
             Fe = el.load_vector(f_vec).astype(np.float32)
 
             nodes = np.array(element)
-            global_dofs = FemModelPETSc._compute_global_dofs(nodes, el.dofs_per_node)
+            global_dofs = np.empty(el.dofs_per_node * len(element))
+            global_dofs = global_dofs.astype(np.int32)
+            for i in range(el.dofs_per_node):
+                global_dofs[i :: el.dofs_per_node] = el.dofs_per_node * nodes + i
 
             f_global.setValues(global_dofs, Fe, addv=PETSc.InsertMode.ADD)
 
@@ -600,4 +604,3 @@ class FemModelPETSc(FEA):
 
         frequencies = np.sqrt(np.maximum(eigvals[:num_modes], 0)) / (2 * np.pi)
         return frequencies[:num_modes], np.array(eigvecs)[:, :num_modes]
-
