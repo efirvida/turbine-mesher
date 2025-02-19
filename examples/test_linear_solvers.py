@@ -18,7 +18,7 @@ NU = 0.3
 LOAD = -(2e-3 * 9.81)
 
 WIDTH, HEIGHT = 10, 1
-CELLS_PER_UNIT = 10
+CELLS_PER_UNIT = 8
 
 NX, NY = WIDTH * CELLS_PER_UNIT, HEIGHT * CELLS_PER_UNIT
 mesh = SquareShapeMesh.create_rectangle(
@@ -36,8 +36,6 @@ solver_times = []
 for Solver in Solvers:
     start = time.time()
     fem = Solver(mesh, E, NU, 1)
-    fem.assemble_K()
-    fem.assemble_M()
     fem.apply_volumetric_load([0, LOAD])
     fem.apply_dirichlet_bc(left_nodes, 0)
     fem.apply_dirichlet_bc(right_nodes, 0)
@@ -64,7 +62,7 @@ CurrentSolver = Solvers[-1]
 
 max_displacements = []
 num_elements = []
-for CELLS_PER_UNIT in [10, 15, 20, 25, 30, 35, 40]:
+for CELLS_PER_UNIT in [10, 15, 20, 25, 30, 35, 40, 50, 60]:
     NX, NY = WIDTH * CELLS_PER_UNIT, HEIGHT * CELLS_PER_UNIT
     mesh = SquareShapeMesh.create_rectangle(
         WIDTH, HEIGHT, NX, NY, quadratic=True, triangular=False

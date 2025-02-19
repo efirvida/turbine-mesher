@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from typing import Literal
 
 import meshio
 import numpy as np
@@ -6,18 +7,17 @@ import scipy
 from petsc4py import PETSc
 from slepc4py import SLEPc
 
-from turbine_mesher.elements import (
+from .elements import (
     LagrangeElement,
     QuadElement,
     SerendipityElement,
     TriElement,
     TriQuadElement,
 )
-
 from .helpers import petsc_to_numpy
 
 # Mapeo del número de nodos al tipo de elemento
-ELEMENTS_MAP = {
+ELEMENTS_MAP_2D = {
     3: TriElement,
     4: QuadElement,
     6: TriQuadElement,
@@ -27,36 +27,86 @@ ELEMENTS_MAP = {
 
 
 class FEA(ABC):
-    def __init__(self, mesh, E, nu, rho):
+    def __init__(self, mesh, E: float, nu: float, rho: float = 1):
         self.mesh = mesh
         self.dim = self.mesh.dim
         self.ndof = self.dim * self.mesh.num_nodes
         self.E = E
         self.nu = nu
         self.rho = rho
-        self._u = None
-        self._K = None
-        self._M = None
-        self._f = None
+        self._u = np.array([])
+        self._K = np.array([])
+        self._M = np.array([])
+        self._f = np.array([])
+
+        self.global_dof_map = {}
+        for element_id, element in mesh.elements_map.items():
+            nodes = np.array(element)
+            element_type = ELEMENTS_MAP_2D[len(element)]
+            global_dofs = np.empty(element_type.dofs_per_node * len(nodes))  # Asegurar enteros
+            global_dofs = global_dofs.astype(np.int32)
+            for i in range(element_type.dofs_per_node):
+                global_dofs[i :: element_type.dofs_per_node] = (
+                    element_type.dofs_per_node * nodes + i
+                )
+            self.global_dof_map[element_id] = global_dofs
 
     @property
-    def u(self):
+    def u(self) -> np.ndarray:
         return self._u
 
     @property
-    def K(self):
+    def K(self) -> np.ndarray:
         return self._K
 
     @property
-    def M(self):
+    def M(self) -> np.ndarray:
         return self._M
 
     @property
-    def f(self):
+    def f(self) -> np.ndarray:
         return self._f
 
+    def assemble_K(self):
+        """
+        Assemble the global stiffness matrix from element stiffness matrices.
+
+        The global stiffness matrix is assembled as:
+
+            .. math::
+                K = \\sum_{e} T_e^T K_e T_e,
+
+        where \\(K_e\\) is the stiffness matrix of element \\(e\\) and \\(T_e\\) is the transformation
+        from element degrees of freedom to global degrees of freedom.
+
+        Returns
+        -------
+        PETSc.Mat
+            The assembled global stiffness matrix.
+        """
+        self._K = self._assemble_matrix("K")
+
+    def assemble_M(self):
+        """
+        Assemble the global mass matrix from element mass matrices.
+
+        The global mass matrix is assembled as:
+
+            .. math::
+                M = \\sum_{e} T_e^T M_e T_e,
+
+        where \\(M_e\\) is the mass matrix of element \\(e\\) and \\(T_e\\) is the transformation
+        from element degrees of freedom to global degrees of freedom.
+
+        Returns
+        -------
+        PETSc.Mat
+            The assembled global mass matrix.
+        """
+        self._M = self._assemble_matrix("M")
+
     @abstractmethod
-    def assemble_K(self): ...
+    def _assemble_matrix(self, property: Literal["K", "M"]): ...
 
     @abstractmethod
     def apply_volumetric_load(self, f_vec): ...
@@ -69,6 +119,9 @@ class FEA(ABC):
 
     @abstractmethod
     def solve_linear_system(self): ...
+
+    @abstractmethod
+    def solve_modal_analysis(self): ...
 
     def write_results(self, output_file: str):
         """Escribe los resultados en un archivo VTK."""
@@ -92,47 +145,36 @@ class FEA(ABC):
 
 
 class FemModel(FEA):
-    def __init__(self, mesh, E, nu, rho=1):
+    def __init__(self, mesh, E: float, nu: float, rho: float = 1):
         super().__init__(mesh, E, nu, rho)
         self._K = np.zeros((self.ndof, self.ndof))
         self._M = np.zeros((self.ndof, self.ndof))
         self._f = np.zeros((self.mesh.num_nodes, self.dim))
+        self.assemble_K()
+        self.assemble_M()
 
-    def assemble_K(self):
-        for element in self.mesh.elements_map.values():
+    def _assemble_matrix(self, property: Literal["K", "M"] = "K"):
+        if property not in ("K", "M"):
+            raise NotImplementedError
+
+        matrix = np.zeros((self.ndof, self.ndof))
+        for element_id, element in self.mesh.elements_map.items():
             coords = self.mesh.nodes[element]
             num_nodes = len(element)
-            element_type = ELEMENTS_MAP[num_nodes]
+            element_type = ELEMENTS_MAP_2D[num_nodes]
             el = element_type(coords, self.E, self.nu, self.rho)
-            Ke = el.Ke
-            assert np.allclose(Ke, Ke.T), "La matriz de rigidez elemental no es simétrica"
 
-            nodes = np.array(element)
-            global_dofs = np.empty(el.dofs_per_node * num_nodes)
-            global_dofs = global_dofs.astype(int)
-            for i in range(el.dofs_per_node):
-                global_dofs[i :: el.dofs_per_node] = el.dofs_per_node * nodes + i
+            if property == "K":
+                P = el.Ke
+            if property == "M":
+                P = el.Ke
 
-            self._K[np.ix_(global_dofs, global_dofs)] += Ke
-        return self._K
+            assert np.allclose(P, P.T), f"La matriz {property} elemental no es simétrica"
 
-    def assemble_M(self):
-        for element in self.mesh.elements_map.values():
-            coords = self.mesh.nodes[element]
-            num_nodes = len(element)
-            element_type = ELEMENTS_MAP[num_nodes]
-            el = element_type(coords, self.E, self.nu, self.rho)
-            Me = el.Me
-            assert np.allclose(Me, Me.T), "La matriz de rigidez elemental no es simétrica"
+            global_dofs = self.global_dof_map[element_id]
 
-            nodes = np.array(element)
-            global_dofs = np.empty(el.dofs_per_node * num_nodes)
-            global_dofs = global_dofs.astype(int)
-            for i in range(el.dofs_per_node):
-                global_dofs[i :: el.dofs_per_node] = el.dofs_per_node * nodes + i
-
-            self._M[np.ix_(global_dofs, global_dofs)] += Me
-        return self._M
+            matrix[np.ix_(global_dofs, global_dofs)] += P
+        return matrix
 
     def apply_volumetric_load(self, f_vec):
         """
@@ -148,44 +190,15 @@ class FemModel(FEA):
         f_global : array, shape (ndof,)
         """
         f_global = np.zeros(self.ndof)
-        for element in self.mesh.elements_map.values():
+        for element_id, element in self.mesh.elements_map.items():
             # Se omiten los índices -1 si existen
             coords = self.mesh.nodes[element]
 
-            # Crea el elemento (nota: podrías parametrizar el número de puntos de cuadratura)
-            element_type = ELEMENTS_MAP[len(element)]
+            element_type = ELEMENTS_MAP_2D[len(element)]
             el = element_type(coords, self.E, self.nu)
-            points, weights = el.integration_points
+            Fe = el.load_vector(f_vec).astype(np.float32)
 
-            Fe = np.zeros(el.dofs)  # Vector de carga elemental
-
-            # Recorre los puntos de integración
-            for (xi, eta), w in zip(points, weights):
-                # Evalúa las funciones de forma en (xi, eta)
-                N = el.shape_functions(xi, eta)  # Debe retornar un array de longitud n_nodos
-
-                # Calcula el Jacobiano como en la asamblea de la matriz de rigidez
-                dN_dxi, dN_deta = el.shape_function_derivatives(xi, eta)
-                J = np.array(
-                    [
-                        [dN_dxi @ coords[:, 0], dN_deta @ coords[:, 0]],
-                        [dN_dxi @ coords[:, 1], dN_deta @ coords[:, 1]],
-                    ]
-                )
-                detJ = np.linalg.det(J)
-
-                # Contribución elemental: se asume que la distribución es la misma en x e y
-                # Se deben asignar las contribuciones a cada DOF:
-                # Por ejemplo, si los DOF están ordenados como [u1_x, u1_y, u2_x, u2_y, ...]
-                Fe[0::2] += N * f_vec[0] * detJ * w
-                Fe[1::2] += N * f_vec[1] * detJ * w
-
-            # Mapear los DOF locales a los globales
-            nodes = np.array(element)
-            global_dofs = np.empty(el.dofs_per_node * len(element))
-            global_dofs = global_dofs.astype(np.int32)
-            for i in range(el.dofs_per_node):
-                global_dofs[i :: el.dofs_per_node] = el.dofs_per_node * nodes + i
+            global_dofs = self.global_dof_map[element_id]
 
             # Sumar la contribución elemental al vector global
             f_global[global_dofs.astype(int)] += Fe
@@ -276,7 +289,7 @@ class FemModelPETSc(FEA):
         - \\(\\Omega\\) is the element domain.
     """
 
-    def __init__(self, mesh, E, nu, rho=1):
+    def __init__(self, mesh, E: float, nu: float, rho: float = 1):
         """
         Initialize the FEM model with the provided mesh and material properties.
 
@@ -288,156 +301,77 @@ class FemModelPETSc(FEA):
             Young's modulus.
         nu : float
             Poisson's ratio.
+        rho : float
+            Material density.
         """
         super().__init__(mesh, E, nu, rho)
 
         self.dim = 2
-        self._elem_dofs_cache = [self._get_element_dofs(elem) for elem in self.mesh.elements]
 
-        nnz = self._compute_nnz()
-        self._K = self._create_matrix(nnz)
-        self._M = self._create_matrix(nnz)
+        self.nnz = self._compute_nnz()
+        self._K = self._create_matrix()
+        self._M = self._create_matrix()
         self._f = PETSc.Vec().createWithArray(np.zeros(self.ndof))
         self._u = PETSc.Vec().createWithArray(np.zeros(self.ndof))
+        self.assemble_K()
+        self.assemble_M()
 
     def _compute_nnz(self):
         """Calcula número de no-ceros por fila basado en conectividad de la malla."""
         adjacency = [set() for _ in range(self.ndof)]
-        for elem in self.mesh.elements:
-            dofs = self._get_element_dofs(elem)
+        for element in self.mesh.elements:
+            element_type = ELEMENTS_MAP_2D[len(element)]
+            dofs = [element_type.dofs_per_node * node + i for node in element for i in (0, 1)]
             for i in dofs:
                 adjacency[i].update(dofs)
         return [len(adj) for adj in adjacency]
 
-    def _create_matrix(self, nnz):
+    def _create_matrix(self):
         """Crea matriz PETSc con preasignación óptima."""
-        mat = PETSc.Mat().createAIJ((self.ndof, self.ndof), nnz=nnz)
+        mat = PETSc.Mat().createAIJ((self.ndof, self.ndof), nnz=self.nnz)
         mat.setUp()
         mat.setOption(PETSc.Mat.Option.NEW_NONZERO_ALLOCATION_ERR, False)
         return mat
 
-    def _get_element_dofs(self, elem):
-        """Obtiene DOFs globales para un elemento."""
-        return [2 * node + i for node in elem for i in (0, 1)]
-
     @property
-    def u(self):
-        """
-        Get the computed displacement vector.
-
-        Returns
-        -------
-        np.ndarray
-            Displacement vector as a NumPy array.
-        """
+    def u(self) -> np.ndarray:
         return self._u.getArray()
 
     @property
-    def K(self):
-        """
-        Get the assembled global stiffness matrix.
-
-        Returns
-        -------
-        np.ndarray
-            Global stiffness matrix as a NumPy array.
-        """
+    def K(self) -> np.ndarray:
         return petsc_to_numpy(self._K)
 
     @property
-    def M(self):
-        """
-        Get the assembled global mass matrix.
-
-        Returns
-        -------
-        np.ndarray
-            Global mass matrix as a NumPy array.
-        """
+    def M(self) -> np.ndarray:
         return petsc_to_numpy(self._M)
 
     @property
-    def f(self):
-        """
-        Get the assembled global load vector.
-
-        Returns
-        -------
-        np.ndarray
-            Global load vector as a NumPy array.
-        """
+    def f(self) -> np.ndarray:
         return self._f.getArray()
 
-    def assemble_K(self):
-        """
-        Assemble the global stiffness matrix from element stiffness matrices.
+    def _assemble_matrix(self, property: Literal["K", "M"] = "K"):
+        if property not in ("K", "M"):
+            raise NotImplementedError
 
-        The global stiffness matrix is assembled as:
-
-            .. math::
-                K = \\sum_{e} T_e^T K_e T_e,
-
-        where \\(K_e\\) is the stiffness matrix of element \\(e\\) and \\(T_e\\) is the transformation
-        from element degrees of freedom to global degrees of freedom.
-
-        Returns
-        -------
-        PETSc.Mat
-            The assembled global stiffness matrix.
-        """
-        for element in self.mesh.elements_map.values():
+        matrix = self._create_matrix()
+        for element_id, element in self.mesh.elements_map.items():
             coords = self.mesh.nodes[element]
 
-            element_type = ELEMENTS_MAP[len(element)]
+            element_type = ELEMENTS_MAP_2D[len(element)]
             el = element_type(coords, self.E, self.nu, self.rho)
-            Ke = el.Ke
-            assert np.allclose(Ke, Ke.T), "Element stiffness matrix is not symmetric."
+            if property == "K":
+                P = el.Ke
+            if property == "M":
+                P = el.Ke
 
-            nodes = np.array(element)  # Asegurar que los nodos sean enteros
-            global_dofs = np.empty(el.dofs_per_node * len(coords))  # Asegurar enteros
-            global_dofs = global_dofs.astype(np.int32)
-            for i in range(el.dofs_per_node):
-                global_dofs[i :: el.dofs_per_node] = el.dofs_per_node * nodes + i
+            assert np.allclose(P, P.T), f"Element {property} matrix is not symmetric."
 
-            self._K.setValues(global_dofs, global_dofs, Ke, addv=PETSc.InsertMode.ADD)
+            global_dofs = self.global_dof_map[element_id]
 
-        self._K.assemble()
-        return self._K
+            matrix.setValues(global_dofs, global_dofs, P, addv=PETSc.InsertMode.ADD)
 
-    def assemble_M(self):
-        """
-        Assemble the global mass matrix from element mass matrices.
-
-        The global mass matrix is assembled as:
-
-            .. math::
-                M = \\sum_{e} T_e^T M_e T_e,
-
-        where \\(M_e\\) is the mass matrix of element \\(e\\) and \\(T_e\\) is the transformation
-        from element degrees of freedom to global degrees of freedom.
-
-        Returns
-        -------
-        PETSc.Mat
-            The assembled global mass matrix.
-        """
-        for element in self.mesh.elements_map.values():
-            coords = self.mesh.nodes[element]
-
-            element_type = ELEMENTS_MAP[len(element)]
-            el = element_type(coords, self.E, self.nu, self.rho)
-            Me = el.Me
-
-            nodes = np.array(element)  # Asegurar que los nodos sean enteros
-            global_dofs = np.empty(el.dofs_per_node * len(coords))  # Asegurar enteros
-            global_dofs = global_dofs.astype(np.int32)
-            for i in range(el.dofs_per_node):
-                global_dofs[i :: el.dofs_per_node] = el.dofs_per_node * nodes + i
-
-            self._M.setValues(global_dofs, global_dofs, Me, addv=PETSc.InsertMode.ADD)
-
-        self._M.assemble()
-        return self._M
+        matrix.assemble()
+        return matrix
 
     def apply_volumetric_load(self, f_vec):
         """
@@ -461,19 +395,14 @@ class FemModelPETSc(FEA):
         None
         """
         f_global = PETSc.Vec().createWithArray(np.zeros(self.ndof))
-        for element in self.mesh.elements_map.values():
+        for element_id, element in self.mesh.elements_map.items():
             coords = self.mesh.nodes[element]
 
-            element_type = ELEMENTS_MAP[len(element)]
+            element_type = ELEMENTS_MAP_2D[len(element)]
             el = element_type(coords, self.E, self.nu)
             Fe = el.load_vector(f_vec).astype(np.float32)
 
-            nodes = np.array(element)
-            global_dofs = np.empty(el.dofs_per_node * len(element))
-            global_dofs = global_dofs.astype(np.int32)
-            for i in range(el.dofs_per_node):
-                global_dofs[i :: el.dofs_per_node] = el.dofs_per_node * nodes + i
-
+            global_dofs = self.global_dof_map[element_id]
             f_global.setValues(global_dofs, Fe, addv=PETSc.InsertMode.ADD)
 
         f_global.assemble()

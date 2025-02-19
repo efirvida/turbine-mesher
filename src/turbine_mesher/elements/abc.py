@@ -37,7 +37,9 @@ class Element2D(ABC):
         - \\(\\Omega\\) is the element domain.
     """
 
-    def __init__(self, coords: np.ndarray, E: float, nu: float, density: float = 1.0):
+    dofs_per_node = 2
+
+    def __init__(self, coords: np.ndarray, E: float, nu: float, rho: float = 1.0):
         """
         Initialize the element with nodal coordinates and material properties.
 
@@ -49,19 +51,18 @@ class Element2D(ABC):
             Young's modulus of the material.
         nu : float
             Poisson's ratio of the material.
-        density : float, optional
+        rho : float, optional
             Material density (default is 1.0).
         """
         self.coords = coords
         self.n_nodes = coords.shape[0]
         self.E = E
         self.nu = nu
-        self.density = density
-        self.dofs_per_node = 2
+        self.rho = rho
         self._K = np.zeros((self.dofs, self.dofs))
         self._M = np.zeros((self.dofs, self.dofs))
         self._f = np.zeros(self.dofs)
-        self._integration_points = 1  # Number of Gauss integration points
+        self._gauss_order = 1  # Number of Gauss integration points
 
     @property
     def dofs(self) -> int:
@@ -90,7 +91,7 @@ class Element2D(ABC):
                 - points: an array of integration points,
                 - weights: an array of corresponding weights.
         """
-        return gauss_legendre_quadrature(self._integration_points)
+        return gauss_legendre_quadrature(self._gauss_order)
 
     @property
     def C(self) -> np.ndarray:
@@ -193,7 +194,7 @@ class Element2D(ABC):
             N_matrix[0, 0::2] = N_values
             N_matrix[1, 1::2] = N_values
 
-            self._M += self.density * (N_matrix.T @ N_matrix) * det_J * w
+            self._M += self.rho * (N_matrix.T @ N_matrix) * det_J * w
 
         return self._M
 
@@ -207,7 +208,7 @@ class Element2D(ABC):
         str
             A string indicating the element type (e.g., 'Triangular', 'Quadrilateral').
         """
-        return "Generic 2D"
+        return self.__class__.__name__
 
     def load_vector(self, body_force: np.ndarray) -> np.ndarray:
         """
@@ -305,6 +306,14 @@ class Element2D(ABC):
             raise ValueError("Jacobian determinant is non-positive. Check the node orientation.")
         inv_J = np.linalg.inv(J)
         return J, det_J, inv_J
+
+    def _compute_cartesian_derivatives(
+        self, dN_dxi: np.ndarray, dN_deta: np.ndarray, inv_J: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Derivadas cartesianas dN/dx y dN/dy."""
+        dN_dx = inv_J[0, 0] * dN_dxi + inv_J[0, 1] * dN_deta
+        dN_dy = inv_J[1, 0] * dN_dxi + inv_J[1, 1] * dN_deta
+        return dN_dx, dN_dy
 
     @property
     @abstractmethod

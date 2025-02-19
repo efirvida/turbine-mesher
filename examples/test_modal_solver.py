@@ -20,15 +20,11 @@ fixed_nodes = np.array(mesh.node_sets["bottom"])
 
 start = time.time()
 fem_np = FemModel(mesh, E, NU, RHO)
-fem_np.assemble_K()
-fem_np.assemble_M()
 fem_np.apply_dirichlet_bc(fixed_nodes, 0.0)
 n_freqs, _ = fem_np.solve_modal_analysis(10)
 
 start = time.time()
 fem_petsc = FemModelPETSc(mesh, E, NU, RHO)
-fem_petsc.assemble_K()
-fem_petsc.assemble_M()
 fem_petsc.apply_dirichlet_bc(fixed_nodes, 0.0)
 p_freqs, _ = fem_petsc.solve_modal_analysis(10)
 

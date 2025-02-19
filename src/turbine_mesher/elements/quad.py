@@ -17,7 +17,7 @@ class QuadElement(Element2D):
         Node 0 (bottom-left), Node 1 (bottom-right), Node 2 (top-right), Node 3 (top-left)
     """
 
-    def __init__(self, coords: np.ndarray, E: float, nu: float, density: float = 1):
+    def __init__(self, coords: np.ndarray, E: float, nu: float, rho: float = 1):
         """
         Initialize quadrilateral element.
 
@@ -34,8 +34,8 @@ class QuadElement(Element2D):
             Must be shape (4, 3) or (4, 2)
         """
 
-        super().__init__(coords, E, nu, density)
-        self._integration_points = 2
+        super().__init__(coords, E, nu, rho)
+        self._gauss_order = 2
 
     def shape_functions(self, xi: float, eta: float) -> np.ndarray:
         """
@@ -113,7 +113,7 @@ class SerendipityElement(QuadElement):
         Node 6 (top-mid), Node 7 (left-mid)
     """
 
-    def __init__(self, coords: np.ndarray, E: float, nu: float, density: float = 1):
+    def __init__(self, coords: np.ndarray, E: float, nu: float, rho: float = 1):
         """
         Initialize the 8-node serendipity element.
 
@@ -131,7 +131,7 @@ class SerendipityElement(QuadElement):
              Must be shape (8, 3) or (8,2)
 
         """
-        super().__init__(coords, E, nu, density)
+        super().__init__(coords, E, nu, rho)
 
     def shape_functions(self, xi: float, eta: float) -> np.ndarray:
         """
@@ -201,7 +201,7 @@ class LagrangeElement(QuadElement):
         Node 6 (top-mid), Node 7 (left-mid), Node 8 (center)
     """
 
-    def __init__(self, coords: np.ndarray, E: float, nu: float, density: float = 1):
+    def __init__(self, coords: np.ndarray, E: float, nu: float, rho: float = 1):
         """
         Initialize the 9-node Lagrange element.
 
@@ -219,8 +219,8 @@ class LagrangeElement(QuadElement):
             Must be shape (9, 2) or (9, 3)
 
         """
-        super().__init__(coords, E, nu, density)
-        self._integration_points = 3
+        super().__init__(coords, E, nu, rho)
+        self._gauss_order = 3
 
     def shape_functions(self, xi: float, eta: float) -> np.ndarray:
         """
