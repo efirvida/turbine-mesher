@@ -1,5 +1,5 @@
 [project]
-name = "turbine-mesher"
+name = "turbine_mesher"
 version = "0.1.0"
 description = "Add your description here"
 authors = [
@@ -8,30 +8,30 @@ authors = [
 dependencies = [
     "pynumad>=1.0.0",
     "meshio>=5.3.5",
-    "pip>=24.3.1",
+    "pip>=25.0.1",
     "pyvista>=0.44.2",
     "pyside6>=6.8.2.1",
     "pyvistaqt>=0.11.1",
+    "gmsh>=4.13.1",
 ]
 readme = "README.md"
 requires-python = ">= 3.8"
 
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=42", "wheel", "Cython", "numpy"]
+build-backend = "setuptools.build_meta"
+
 
 [tool.rye]
 managed = true
 dev-dependencies = [
+    "cython>=3.0.12",
     "ruff>=0.8.0",
-    "ipython>=8.29.0",
+    "setuptools>=75.8.0",
 ]
 
 [tool.hatch.metadata]
 allow-direct-references = true
-
-[tool.hatch.build.targets.wheel]
-packages = ["src/turbine_mesher"]
 
 [tool.ruff]
 line-length = 100
@@ -79,6 +79,4 @@ select = [
   "SIM110", # https://docs.astral.sh/ruff/rules/reimplemented-builtin/
   "SIM101", # use 'isinstance(x, (T1, T2))' instead of two checks.
 ]
-exclude = ["migrations", "__manifest__.py", "source/dists/odoo", "source/addons", "source/dists/openupgradelib"]
-preview = true
 

@@ -8,3 +8,9 @@ wheels/
 
 # venv
 .venv
+.python
+.sources
+
+*.vtk
+*.inp
+*.fbl

@@ -9,8 +9,10 @@
             "type": "debugpy",
             "request": "launch",
             "program": "${file}",
-            "console": "integratedTerminal"
-            "justMyCode": false
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "cwd": "${fileDirname}",
+            "envFile": "${workspaceFolder}/.env"
         }
     ]
 }
