@@ -306,3 +306,13 @@ def quad_area(coords: np.ndarray) -> float:
         return sum(triangle_area(*tri) for tri in triangles)
     else:
         raise ValueError("Input array must have shape (4,2), (8,2), or (9,2).")
+
+
+def petsc_to_numpy(mat):
+    """Converts a PETSc Mat to a NumPy array"""
+    size = mat.getSize()
+    np_mat = np.zeros(size)
+    for i in range(size[0]):
+        row_vals = mat.getValues(i, range(size[1]))
+        np_mat[i, :] = row_vals
+    return np_mat

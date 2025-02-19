@@ -13,6 +13,8 @@ from turbine_mesher.elements import (
     TriQuadElement,
 )
 
+from .helpers import petsc_to_numpy
+
 # Mapeo del número de nodos al tipo de elemento
 ELEMENTS_MAP = {
     3: TriElement,
@@ -392,7 +394,7 @@ class FemModelPETSc(FEA):
         np.ndarray
             Global stiffness matrix as a NumPy array.
         """
-        return self._K.getArray()
+        return petsc_to_numpy(self._K)
 
     @property
     def M(self):
@@ -404,7 +406,7 @@ class FemModelPETSc(FEA):
         np.ndarray
             Global mass matrix as a NumPy array.
         """
-        return self._M.getArray()
+        return petsc_to_numpy(self._M)
 
     @property
     def f(self):
