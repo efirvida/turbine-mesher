@@ -24,14 +24,18 @@ ELEMENTS_MAP = {
 
 
 class FEA(ABC):
-    def __init__(self, mesh, E, nu):
+    def __init__(self, mesh, E, nu, rho):
         self.mesh = mesh
         self.dim = self.mesh.dim
         self.ndof = self.dim * self.mesh.num_nodes
         self.E = E
         self.nu = nu
+        self.rho = rho
+        self.rho = rho
+        self._M = None
         self._u = None
         self._K = None
+        self._M = None
         self._f = None
 
     @property
@@ -39,8 +43,16 @@ class FEA(ABC):
         return self._u
 
     @property
+    def M(self):
+        return self._M
+
+    @property
     def K(self):
         return self._K
+
+    @property
+    def M(self):
+        return self._M
 
     @property
     def f(self):
@@ -71,9 +83,7 @@ class FEA(ABC):
         for element_kind, labels in self.mesh.elements_class.items():
             if labels:
                 cells.append(
-                    (
-                        element_kind.lower(),  # <- FIXME use better thing here
-                        [[i for i in el if i != -1] for el in self.mesh.elements[labels]],
+        super().__init__(mesh, E, nu, rho)
                     )
                 )
 
@@ -83,9 +93,9 @@ class FEA(ABC):
 
 
 class FemModel(FEA):
-    def __init__(self, mesh, E, nu):
-        super().__init__(mesh, E, nu)
-        self._K = np.zeros((self.ndof, self.ndof), dtype=np.float32)
+    def __init__(self, mesh, E, nu, rho=1):
+        super().__init__(mesh, E, nu, rho)
+        self._M = np.zeros((self.ndof, self.ndof))
         self._f = np.zeros((self.mesh.num_nodes, self.dim))
 
     def assemble_K(self):
@@ -104,6 +114,42 @@ class FemModel(FEA):
 
             self._K[np.ix_(global_dofs, global_dofs)] += Ke
         return self._K
+
+    def assemble_M(self):
+        for element in self.mesh.elements_map.values():
+            coords = self.mesh.nodes[element]
+            num_nodes = len(element)
+            element_type = ELEMENTS_MAP[num_nodes]
+            el = element_type(coords, self.E, self.nu, self.rho)
+            Me = el.Me
+            assert np.allclose(Me, Me.T), "La matriz de rigidez elemental no es simétrica"
+
+            nodes = np.array(element)
+            global_dofs = np.empty(el.dofs_per_node * num_nodes)
+            global_dofs = global_dofs.astype(int)
+            for i in range(el.dofs_per_node):
+                global_dofs[i :: el.dofs_per_node] = el.dofs_per_node * nodes + i
+
+            self._M[np.ix_(global_dofs, global_dofs)] += Me
+        return self._M
+
+    def assemble_M(self):
+        for element in self.mesh.elements_map.values():
+            coords = self.mesh.nodes[element]
+            num_nodes = len(element)
+            element_type = ELEMENTS_MAP[num_nodes]
+            el = element_type(coords, self.E, self.nu, self.rho)
+            Me = el.Me
+            assert np.allclose(Me, Me.T), "La matriz de rigidez elemental no es simétrica"
+
+            nodes = np.array(element)
+            global_dofs = np.empty(el.dofs_per_node * num_nodes)
+            global_dofs = global_dofs.astype(int)
+            for i in range(el.dofs_per_node):
+                global_dofs[i :: el.dofs_per_node] = el.dofs_per_node * nodes + i
+
+            self._M[np.ix_(global_dofs, global_dofs)] += Me
+        return self._M
 
     def apply_volumetric_load(self, f_vec):
         """
@@ -179,11 +225,71 @@ class FemModel(FEA):
                 self._K[:, idx] = value
                 self._K[idx, idx] = 1
 
+                # Aplicar condición en la matriz de masa
+                self._M[idx, :] = 0.0
+                self._M[:, idx] = 0.0
+                self._M[idx, idx] = 1.0
+
+                self._f[idx] = 0.0
                 self.f[idx] = 0.0
+                # Aplicar condición en la matriz de masa
+                self._M[idx, :] = 0.0
+                self._M[:, idx] = 0.0
+                self._M[idx, idx] = 1.0
+
+                self._f[idx] = 0.0
 
     def solve_linear_system(self):
         self._u = np.linalg.solve(self._K, self.f)
         return self._u
+
+    def solve_modal_analysis(self, num_modes=6):
+        """
+        Performs modal analysis to determine the system's natural frequencies and vibration modes.
+
+        Parameters:
+        -----------
+        num_modes : int, optional
+            Number of eigenmodes to compute (default is 6).
+
+        Returns
+        -------
+        frequencies : np.ndarray
+            Natural frequencies in Hz.
+        mode_shapes : np.ndarray
+            Corresponding mode shapes (eigenvectors).
+        """
+        eigvals, eigvecs = scipy.linalg.eigh(self.K, self.M)
+        idx = np.argsort(eigvals)
+        eigvals, eigvecs = eigvals[idx], eigvecs[:, idx]
+
+        # Convert eigenvalues to frequencies in Hz
+        frequencies = np.sqrt(np.maximum(eigvals[:num_modes], 0)) / (2 * np.pi)
+        return frequencies, eigvecs[:, :num_modes]
+
+    def solve_modal_analysis(self, num_modes=6):
+        """
+        Performs modal analysis to determine the system's natural frequencies and vibration modes.
+
+        Parameters:
+        -----------
+        num_modes : int, optional
+            Number of eigenmodes to compute (default is 6).
+
+        Returns
+        -------
+        frequencies : np.ndarray
+            Natural frequencies in Hz.
+        mode_shapes : np.ndarray
+            Corresponding mode shapes (eigenvectors).
+        """
+        eigvals, eigvecs = scipy.linalg.eigh(self.K, self.M)
+        idx = np.argsort(eigvals)
+        eigvals, eigvecs = eigvals[idx], eigvecs[:, idx]
+
+        # Convert eigenvalues to frequencies in Hz
+        frequencies = np.sqrt(np.maximum(eigvals[:num_modes], 0)) / (2 * np.pi)
+        return frequencies, eigvecs[:, :num_modes]
 
 
 class FemModelPETSc(FEA):
@@ -231,14 +337,36 @@ class FemModelPETSc(FEA):
         nu : float
             Poisson's ratio.
         """
-        super().__init__(mesh, E, nu)
-        # Create PETSc matrices and vectors for global system assembly.
-        self._K = PETSc.Mat().createAIJ(size=(self.ndof, self.ndof), nnz=100)
-        self._M = PETSc.Mat().createAIJ(size=(self.ndof, self.ndof), nnz=100)
+        super().__init__(mesh, E, nu, rho)
+
+        self.dim = 2
+        self._elem_dofs_cache = [self._get_element_dofs(elem) for elem in self.mesh.elements]
+
+        nnz = self._compute_nnz()
+        self._K = self._create_matrix(nnz)
+        self._M = self._create_matrix(nnz)
         self._f = PETSc.Vec().createWithArray(np.zeros(self.ndof))
         self._u = PETSc.Vec().createWithArray(np.zeros(self.ndof))
-        # Assuming a 2D problem.
-        self.dim = 2
+
+    def _compute_nnz(self):
+        """Calcula número de no-ceros por fila basado en conectividad de la malla."""
+        adjacency = [set() for _ in range(self.ndof)]
+        for elem in self.mesh.elements:
+            dofs = self._get_element_dofs(elem)
+            for i in dofs:
+                adjacency[i].update(dofs)
+        return [len(adj) for adj in adjacency]
+
+    def _create_matrix(self, nnz):
+        """Crea matriz PETSc con preasignación óptima."""
+        mat = PETSc.Mat().createAIJ((self.ndof, self.ndof), nnz=nnz)
+        mat.setUp()
+        mat.setOption(PETSc.Mat.Option.NEW_NONZERO_ALLOCATION_ERR, False)
+        return mat
+
+    def _get_element_dofs(self, elem):
+        """Obtiene DOFs globales para un elemento."""
+        return [2 * node + i for node in elem for i in (0, 1)]
 
     @property
     def u(self):
@@ -365,11 +493,14 @@ class FemModelPETSc(FEA):
             coords = self.mesh.nodes[element]
 
             element_type = ELEMENTS_MAP[len(element)]
-            el = element_type(coords, self.E, self.nu)
-            Me = el.Me.astype(np.float32)
+            el = element_type(coords, self.E, self.nu, self.rho)
+            Me = el.Me
 
-            nodes = np.array(element)
-            global_dofs = FemModelPETSc._compute_global_dofs(nodes, el.dofs_per_node)
+            nodes = np.array(element)  # Asegurar que los nodos sean enteros
+            global_dofs = np.empty(el.dofs_per_node * len(coords))  # Asegurar enteros
+            global_dofs = global_dofs.astype(np.int32)
+            for i in range(el.dofs_per_node):
+                global_dofs[i :: el.dofs_per_node] = el.dofs_per_node * nodes + i
 
             self._M.setValues(global_dofs, global_dofs, Me, addv=PETSc.InsertMode.ADD)
 
@@ -452,9 +583,9 @@ class FemModelPETSc(FEA):
         for i in nodes:
             for d in range(self.dim):
                 idx = self.dim * i + d
-                # Adjust the global load vector and zero out the row/column corresponding to the fixed DOF.
                 self._K.zeroRowsColumns([idx], diag=1.0, x=self._f)
-                self._f.setValue(idx, value)
+                self._M.zeroRowsColumns([idx], diag=1.0, x=self._f)
+                self._f.setValue(idx, 0.0)
 
     def solve_linear_system(self):
         """
@@ -479,7 +610,7 @@ class FemModelPETSc(FEA):
         ksp.solve(self._f, self._u)
         return self._u.getArray()
 
-    def solve_modal_analysis(self, num_modes=6):
+    def solve_modal_analysis(self, num_modes: int = 6):
         """
         Performs modal analysis to determine the system's natural frequencies and vibration modes.
 

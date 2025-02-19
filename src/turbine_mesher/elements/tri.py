@@ -15,11 +15,11 @@ class TriElement(Element2D):
     Linear triangular element with 3 nodes for 2D finite element analysis.
     """
 
-    def __init__(self, coords: np.ndarray, E: float, nu: float):
+    def __init__(self, coords: np.ndarray, E: float, nu: float, density: float = 1):
         """
         Initialize the linear triangular element with nodal coordinates.
         """
-        super().__init__(coords, E, nu)  # 1 Gauss point
+        super().__init__(coords, E, nu, density)  # 1 Gauss point
 
     def shape_functions(self, xi: float, eta: float) -> np.ndarray:
         N1 = 1 - xi - eta
@@ -102,11 +102,11 @@ class TriQuadElement(TriElement):
     Quadratic triangular element with 6 nodes for 2D finite element analysis.
     """
 
-    def __init__(self, coords: np.ndarray, E: float, nu: float):
+    def __init__(self, coords: np.ndarray, E: float, nu: float, density: float = 1):
         """
         Initialize the linear triangular element with nodal coordinates.
         """
-        super().__init__(coords, E, nu)  # 1 Gauss point
+        super().__init__(coords, E, nu, density)
         self._integration_points = 7
 
     def shape_functions(self, xi: float, eta: float) -> np.ndarray:
