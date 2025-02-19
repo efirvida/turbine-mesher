@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 
 import meshio
 import numpy as np
+import scipy
 from petsc4py import PETSc
 from slepc4py import SLEPc
 
@@ -33,8 +34,6 @@ class FEA(ABC):
         self.E = E
         self.nu = nu
         self.rho = rho
-        self.rho = rho
-        self._M = None
         self._u = None
         self._K = None
         self._M = None
@@ -43,10 +42,6 @@ class FEA(ABC):
     @property
     def u(self):
         return self._u
-
-    @property
-    def M(self):
-        return self._M
 
     @property
     def K(self):
@@ -99,6 +94,7 @@ class FEA(ABC):
 class FemModel(FEA):
     def __init__(self, mesh, E, nu, rho=1):
         super().__init__(mesh, E, nu, rho)
+        self._K = np.zeros((self.ndof, self.ndof))
         self._M = np.zeros((self.ndof, self.ndof))
         self._f = np.zeros((self.mesh.num_nodes, self.dim))
 
@@ -107,26 +103,9 @@ class FemModel(FEA):
             coords = self.mesh.nodes[element]
             num_nodes = len(element)
             element_type = ELEMENTS_MAP[num_nodes]
-            el = element_type(coords, self.E, self.nu)
+            el = element_type(coords, self.E, self.nu, self.rho)
             Ke = el.Ke
             assert np.allclose(Ke, Ke.T), "La matriz de rigidez elemental no es simétrica"
-
-            nodes = np.array(element)
-            global_dofs = np.empty(el.dofs_per_node * num_nodes, dtype=int)
-            for i in range(el.dofs_per_node):
-                global_dofs[i :: el.dofs_per_node] = el.dofs_per_node * nodes + i
-
-            self._K[np.ix_(global_dofs, global_dofs)] += Ke
-        return self._K
-
-    def assemble_M(self):
-        for element in self.mesh.elements_map.values():
-            coords = self.mesh.nodes[element]
-            num_nodes = len(element)
-            element_type = ELEMENTS_MAP[num_nodes]
-            el = element_type(coords, self.E, self.nu, self.rho)
-            Me = el.Me
-            assert np.allclose(Me, Me.T), "La matriz de rigidez elemental no es simétrica"
 
             nodes = np.array(element)
             global_dofs = np.empty(el.dofs_per_node * num_nodes)
@@ -134,8 +113,8 @@ class FemModel(FEA):
             for i in range(el.dofs_per_node):
                 global_dofs[i :: el.dofs_per_node] = el.dofs_per_node * nodes + i
 
-            self._M[np.ix_(global_dofs, global_dofs)] += Me
-        return self._M
+            self._K[np.ix_(global_dofs, global_dofs)] += Ke
+        return self._K
 
     def assemble_M(self):
         for element in self.mesh.elements_map.values():
@@ -168,7 +147,7 @@ class FemModel(FEA):
         -------
         f_global : array, shape (ndof,)
         """
-        f_global = np.zeros(self.ndof, dtype=float)
+        f_global = np.zeros(self.ndof)
         for element in self.mesh.elements_map.values():
             # Se omiten los índices -1 si existen
             coords = self.mesh.nodes[element]
@@ -203,7 +182,7 @@ class FemModel(FEA):
 
             # Mapear los DOF locales a los globales
             nodes = np.array(element)
-            global_dofs = np.empty(el.dofs_per_node * len(element), dtype=int)
+            global_dofs = np.empty(el.dofs_per_node * len(element))
             for i in range(el.dofs_per_node):
                 global_dofs[i :: el.dofs_per_node] = el.dofs_per_node * nodes + i
 
@@ -229,14 +208,6 @@ class FemModel(FEA):
                 self._K[:, idx] = value
                 self._K[idx, idx] = 1
 
-                # Aplicar condición en la matriz de masa
-                self._M[idx, :] = 0.0
-                self._M[:, idx] = 0.0
-                self._M[idx, idx] = 1.0
-
-                self._f[idx] = 0.0
-                self.f[idx] = 0.0
-                # Aplicar condición en la matriz de masa
                 self._M[idx, :] = 0.0
                 self._M[:, idx] = 0.0
                 self._M[idx, idx] = 1.0
@@ -246,30 +217,6 @@ class FemModel(FEA):
     def solve_linear_system(self):
         self._u = np.linalg.solve(self._K, self.f)
         return self._u
-
-    def solve_modal_analysis(self, num_modes=6):
-        """
-        Performs modal analysis to determine the system's natural frequencies and vibration modes.
-
-        Parameters:
-        -----------
-        num_modes : int, optional
-            Number of eigenmodes to compute (default is 6).
-
-        Returns
-        -------
-        frequencies : np.ndarray
-            Natural frequencies in Hz.
-        mode_shapes : np.ndarray
-            Corresponding mode shapes (eigenvectors).
-        """
-        eigvals, eigvecs = scipy.linalg.eigh(self.K, self.M)
-        idx = np.argsort(eigvals)
-        eigvals, eigvecs = eigvals[idx], eigvecs[:, idx]
-
-        # Convert eigenvalues to frequencies in Hz
-        frequencies = np.sqrt(np.maximum(eigvals[:num_modes], 0)) / (2 * np.pi)
-        return frequencies, eigvecs[:, :num_modes]
 
     def solve_modal_analysis(self, num_modes=6):
         """
@@ -328,7 +275,7 @@ class FemModelPETSc(FEA):
         - \\(\\Omega\\) is the element domain.
     """
 
-    def __init__(self, mesh, E, nu):
+    def __init__(self, mesh, E, nu, rho=1):
         """
         Initialize the FEM model with the provided mesh and material properties.
 
@@ -420,29 +367,6 @@ class FemModelPETSc(FEA):
         """
         return self._f.getArray()
 
-    @staticmethod
-    def _compute_global_dofs(nodes: np.ndarray, dofs_per_node: int) -> np.ndarray:
-        """
-        Compute the global degrees of freedom indices for a given set of node indices.
-
-        Parameters
-        ----------
-        nodes : np.ndarray
-            Array of node indices.
-        dofs_per_node : int
-            Number of degrees of freedom per node.
-
-        Returns
-        -------
-        np.ndarray
-            Array of global degrees of freedom indices.
-        """
-        # Vectorized implementation:
-        return (
-            np.repeat(nodes, dofs_per_node) * dofs_per_node
-            + np.tile(np.arange(dofs_per_node), nodes.size)
-        ).astype(np.int32)
-
     def assemble_K(self):
         """
         Assemble the global stiffness matrix from element stiffness matrices.
@@ -464,12 +388,15 @@ class FemModelPETSc(FEA):
             coords = self.mesh.nodes[element]
 
             element_type = ELEMENTS_MAP[len(element)]
-            el = element_type(coords, self.E, self.nu)
+            el = element_type(coords, self.E, self.nu, self.rho)
             Ke = el.Ke
             assert np.allclose(Ke, Ke.T), "Element stiffness matrix is not symmetric."
 
-            nodes = np.array(element)
-            global_dofs = FemModelPETSc._compute_global_dofs(nodes, el.dofs_per_node)
+            nodes = np.array(element)  # Asegurar que los nodos sean enteros
+            global_dofs = np.empty(el.dofs_per_node * len(coords))  # Asegurar enteros
+            global_dofs = global_dofs.astype(np.int32)
+            for i in range(el.dofs_per_node):
+                global_dofs[i :: el.dofs_per_node] = el.dofs_per_node * nodes + i
 
             self._K.setValues(global_dofs, global_dofs, Ke, addv=PETSc.InsertMode.ADD)
 
@@ -563,8 +490,11 @@ class FemModelPETSc(FEA):
         -------
         None
         """
-        dofs = FemModelPETSc._compute_global_dofs(nodes, self.dim)
-        self._f.setValues(dofs, np.tile(values, nodes.size))
+        dofs = []
+        for node in nodes:
+            dofs.extend([2 * node, 2 * node + 1])  # DOFs para 2D
+        self._f.setValues(dofs, np.repeat(values, len(nodes)))
+        self._f.assemble()
 
     def apply_dirichlet_bc(self, nodes, value):
         """
@@ -623,30 +553,51 @@ class FemModelPETSc(FEA):
         num_modes : int, optional
             Number of eigenmodes to compute (default is 6).
 
-        Returns:
-        --------
-        eigvals : np.ndarray
-            Array containing the natural frequencies in radians per second.
-        eigvecs : np.ndarray
-            Array containing the corresponding vibration modes.
+        Returns
+        -------
+        frequencies : np.ndarray
+            Natural frequencies in Hz.
+        mode_shapes : np.ndarray
+            Corresponding mode shapes (eigenvectors).
         """
+        eff_num_modes = min(num_modes + 5, self._K.getSize()[0])
+
         eps = SLEPc.EPS().create()
-        eps.setOperators(self._K, self._M)
+        eps.setOperators(self._K, self._M)  # K primero, M segundo
         eps.setProblemType(SLEPc.EPS.ProblemType.GHEP)
-        eps.setWhichEigenpairs(SLEPc.EPS.Which.SMALLEST_MAGNITUDE)
-        eps.setDimensions(num_modes, PETSc.DECIDE, PETSc.DECIDE)
+
+        eps.setWhichEigenpairs(SLEPc.EPS.Which.TARGET_MAGNITUDE)  # <-- Usar TARGET_MAGNITUDE
+        eps.setTarget(0.0)  # <-- Necesario para el shift-and-invert
+
+        st = eps.getST()
+        st.setType(SLEPc.ST.Type.SINVERT)
+        st.setShift(0.0)  # Shift en 0 para buscar valores propios pequeños
+
+        ksp = st.getKSP()
+        ksp.setType("preonly")
+        pc = ksp.getPC()
+        pc.setType("lu")
+
+        eps.setDimensions(eff_num_modes, PETSc.DECIDE, PETSc.DECIDE)
+        eps.setTolerances(tol=1e-10, max_it=1000)
+        eps.setFromOptions()
+
         eps.solve()
 
         nconv = eps.getConverged()
-        if nconv == 0:
-            raise RuntimeError("No eigenvalues were found.")
+        if nconv < num_modes:
+            raise RuntimeError(f"Solo {nconv} modos convergieron de {num_modes} solicitados.")
 
-        eigvals = []
-        eigvecs = []
-        vr, vi = self._K.getVecs()
-        for i in range(min(nconv, num_modes)):
-            eigval = eps.getEigenpair(i, vr, vi)
-            eigvals.append(np.sqrt(eigval))
-            eigvecs.append(vr.getArray())
+        eigvals, eigvecs = [], []
+        for i in range(nconv):
+            eigval = eps.getEigenvalue(i)
+            eigvec = self._K.getVecLeft()
+            eps.getEigenvector(i, eigvec)
+            eigvals.append(eigval.real)
+            eigvecs.append(eigvec.array)
 
-        return np.array(eigvals), np.array(eigvecs)
+        eigvals = np.array(eigvals)
+
+        frequencies = np.sqrt(np.maximum(eigvals[:num_modes], 0)) / (2 * np.pi)
+        return frequencies[:num_modes], np.array(eigvecs)[:, :num_modes]
+
