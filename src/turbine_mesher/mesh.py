@@ -187,7 +187,7 @@ class BaseMesh:
             f.write("**      MESH ELEMENTS       **\n")
             f.write("***********************+++****\n")
             for element_kind in ELEMENTS_TO_CALCULIX:
-                if self.elements_class[element_kind]:
+                if self.elements_class[element_kind.name]:
                     f.write(
                         f"*ELEMENT, TYPE={ELEMENTS_TO_CALCULIX[element_kind].value}, ELSET=E_ALL\n"
                     )
@@ -361,7 +361,7 @@ class BaseMesh:
             f.write("\n")
 
         def _write_cells_data(f, cell_sets, total_cells):
-            region_data = np.full(total_cells, -1, dtype=int)
+            region_data = np.full(total_cells, -1)
 
             for region_value, (set_name, elements) in enumerate(cell_sets.items()):
                 if "all" not in set_name:
@@ -376,7 +376,7 @@ class BaseMesh:
             f.write("\n")
 
         def _write_nodes_data(f, node_sets, total_nodes):
-            region_data = np.full(total_nodes, -1, dtype=int)
+            region_data = np.full(total_nodes, -1)
 
             sorted_sets = sorted(node_sets.items(), key=lambda item: len(item[1]), reverse=True)
 
@@ -669,7 +669,7 @@ class SquareShapeMesh(BaseMesh):
             gmsh.model.mesh.generate(2)
 
             node_tags, coords, _ = gmsh.model.mesh.getNodes()
-            nodes_array = np.array(coords, dtype=np.float64).reshape(-1, 3)
+            nodes_array = np.array(coords).reshape(-1, 3)
             self._mesh["nodes"] = nodes_array
 
             elem_types = gmsh.model.mesh.getElementTypes()
@@ -680,7 +680,7 @@ class SquareShapeMesh(BaseMesh):
                     _, node_tags_elem = gmsh.model.mesh.getElementsByType(elem_type)
                     elements.append(node_tags_elem.reshape(-1, element_properties[3]))
 
-            self._mesh["elements"] = np.array(elements[0], dtype=np.int32) - 1
+            self._mesh["elements"] = np.array(elements[0]) - 1
 
             self._create_node_sets(gmsh)
         finally:

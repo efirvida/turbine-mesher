@@ -213,8 +213,8 @@ class MeshViewer(QWidget):
         return (
             pv.UnstructuredGrid(
                 np.hstack(cells).astype(np.int32),
-                np.array(cell_types, dtype=np.uint8),
-                np.array(self.mesh.nodes, dtype=np.float64),
+                np.array(cell_types),
+                np.array(self.mesh.nodes),
             )
             if cells
             else None
@@ -236,7 +236,7 @@ class MeshViewer(QWidget):
         if not node_ids:
             return None
 
-        nodes = np.array(self.mesh.nodes, dtype=np.float64)
+        nodes = np.array(self.mesh.nodes)
         if nodes.shape[1] != 3:
             nodes = np.concatenate((nodes, np.zeros((nodes.shape[0], 1))), axis=1)
 

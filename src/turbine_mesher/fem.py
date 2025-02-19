@@ -83,7 +83,9 @@ class FEA(ABC):
         for element_kind, labels in self.mesh.elements_class.items():
             if labels:
                 cells.append(
-        super().__init__(mesh, E, nu, rho)
+                    (
+                        element_kind.lower(),  # <- FIXME use better thing here
+                        [[i for i in el if i != -1] for el in self.mesh.elements[labels]],
                     )
                 )
 

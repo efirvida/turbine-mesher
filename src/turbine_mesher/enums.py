@@ -23,6 +23,7 @@ ELEMENTS_TO_CALCULIX = {
     ElementsTypes.TRIANGLE6: CalculiXElementTypes.TRIANGLE6,
     ElementsTypes.QUAD: CalculiXElementTypes.QUAD,
     ElementsTypes.QUAD8: CalculiXElementTypes.QUAD8,
+    ElementsTypes.QUAD9: CalculiXElementTypes.QUAD8,
 }
 
 ELEMENTS_TO_VTK = {
