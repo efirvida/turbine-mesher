@@ -20,6 +20,9 @@ READLINE_VERSION   := 8.2
 SQLITE_VERSION     := 3490000
 TCL_VERSION        := 8.6.13
 TK_VERSION         := $(TCL_VERSION)
+EIGEN_VERSION      := 3.3.7
+BOOST_VERSION      := 1.68.0
+LIBXML2_VERSION    := 2.13.6
 
 # Dependency file names
 PYTHON_TAR         := Python-$(PYTHON_VERSION).tgz
@@ -36,6 +39,9 @@ LIBUUID_TAR        := libuuid-$(LIBUUID_VERSION).tar.gz
 OMPI_TAR           := openmpi-$(OMPI_VERSION).tar.gz
 PETSC_TAR          := petsc-$(PETSC_VERSION).tar.gz
 PRECICE_TAR        := v$(PRECICE_VERSION).tar.gz
+EIGEN_TAR          := eigen-$(EIGEN_VERSION).tar.gz
+BOOST_TAR          := boost_1_68_0.tar.gz
+LIBXML2_TAR        := libxml2_v$(LIBXML2_VERSION).tar.gz
 
 # Directory configurations
 include .env
@@ -76,7 +82,7 @@ export Eigen3_ROOT     := $(VENV_DIR)/include/eigen
 
 pip:
 	pip $(filter-out $@,$(MAKECMDGOALS))
-	pip freeze > requirements.txt
+	pip freeze > requirements.lock
 
 %:
 	@:
@@ -108,21 +114,23 @@ $(SOURCES_DIR)/download.done:
 	@mkdir -p $(SOURCES_DIR)
 	@echo "Downloading source packages..."
 	@cd $(SOURCES_DIR) && $(DOWNLOAD) \
-		https://www.python.org/ftp/python/$(PYTHON_VERSION)/$(PYTHON_TAR) \
-		https://github.com/libffi/libffi/releases/download/v$(LIBFFI_VERSION)/$(LIBFFI_TAR) \
-		https://www.openssl.org/source/$(OPENSSL_TAR) \
-		https://www.sqlite.org/2025/$(SQLITE_TAR) \
-		https://sourceware.org/pub/bzip2/$(BZIP2_TAR) \
-		https://ftp.gnu.org/gnu/ncurses/$(NCURSES_TAR) \
+		https://archives.boost.io/release/$(BOOST_VERSION)/source/$(BOOST_TAR) \
+		https://download.open-mpi.org/release/open-mpi/v4.1/$(OMPI_TAR) \
 		https://ftp.gnu.org/gnu/gdbm/$(GDBM_TAR) \
+		https://ftp.gnu.org/gnu/ncurses/$(NCURSES_TAR) \
+		https://ftp.gnu.org/gnu/readline/$(READLINE_TAR) \
+		https://github.com/libffi/libffi/releases/download/v$(LIBFFI_VERSION)/$(LIBFFI_TAR) \
+		https://github.com/precice/precice/archive/$(PRECICE_TAR) \
+		https://gitlab.com/libeigen/eigen/-/archive/$(EIGEN_VERSION)/$(EIGEN_TAR) \
+		https://gitlab.gnome.org/GNOME/libxml2/-/archive/v$(LIBXML2_VERSION)/$(LIBXML2_TAR) \
 		https://prdownloads.sourceforge.net/tcl/$(TCL_TAR) \
 		https://prdownloads.sourceforge.net/tcl/$(TK_TAR) \
-		https://ftp.gnu.org/gnu/readline/$(READLINE_TAR) \
-		https://download.open-mpi.org/release/open-mpi/v4.1/$(OMPI_TAR) \
-		https://web.cels.anl.gov/projects/petsc/download/release-snapshots/$(PETSC_TAR) \
 		https://sourceforge.net/projects/libuuid/files/$(LIBUUID_TAR) \
-		https://github.com/precice/precice/archive/$(PRECICE_TAR) \
-		https://gitlab.com/slepc/slepc/-/archive/v3.22.0/slepc-v3.22.0.tar.gz \
+		https://sourceware.org/pub/bzip2/$(BZIP2_TAR) \
+		https://web.cels.anl.gov/projects/petsc/download/release-snapshots/$(PETSC_TAR) \
+		https://www.openssl.org/source/$(OPENSSL_TAR) \
+		https://www.python.org/ftp/python/$(PYTHON_VERSION)/$(PYTHON_TAR) \
+		https://www.sqlite.org/2025/$(SQLITE_TAR) \
 		https://bitbucket.org/petsc/pkg-fblaslapack/get/v3.4.2-p3.tar.gz \
 		https://bitbucket.org/petsc/pkg-metis/get/v5.1.0-p12.tar.gz \
 		https://bitbucket.org/petsc/pkg-parmetis/get/v4.0.3-p9.tar.gz \
@@ -130,9 +138,11 @@ $(SOURCES_DIR)/download.done:
 		https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz \
 		https://github.com/Reference-ScaLAPACK/scalapack/archive/0234af94c6578c53ac4c19f2925eb6e5c4ad6f0f.tar.gz \
 		https://github.com/xiaoyeli/superlu_dist/archive/eac44cf48878f8699cc19fb566832b6736596727.tar.gz \
+		https://gitlab.com/slepc/slepc/-/archive/v3.22.0/slepc-v3.22.0.tar.gz \
 		https://gitlab.inria.fr/scotch/scotch/-/archive/v7.0.5/scotch-v7.0.5.tar.gz \
-		https://web.cels.anl.gov/projects/petsc/download/externalpackages/hdf5-1.14.3-p1.tar.bz2 \
-		https://mumps-solver.org/MUMPS_5.7.3.tar.gz
+		https://mumps-solver.org/MUMPS_5.7.3.tar.gz \
+		https://web.cels.anl.gov/projects/petsc/download/externalpackages/f2cblaslapack-3.8.0.q2.tar.gz \
+		https://web.cels.anl.gov/projects/petsc/download/externalpackages/hdf5-1.14.3-p1.tar.bz2
 	@touch $@
 
 #-------------------------------------------------------------------------------
@@ -177,16 +187,8 @@ $(VENV_DIR)/.bzip2.done: $(SOURCES_DIR)/download.done
 	@mkdir -p $(BUILD_DIR)/bzip2
 	@tar -xzf $(SOURCES_DIR)/$(BZIP2_TAR) -C $(BUILD_DIR)/bzip2 --strip-components=1
 	@cd $(BUILD_DIR)/bzip2 && \
-		make -f Makefile-libbz2_so && \
-		make bzip2recover libbz2.a && \
-		cp bzip2-shared $(VENV_DIR)/bin/bzip2 && \
-		cp bzip2recover $(VENV_DIR)/bin && \
-		cp bzlib.h $(VENV_DIR)/include && \
-		cp -a libbz2.so* $(VENV_DIR)/lib && \
-		cp libbz2.a $(VENV_DIR)/lib
-	cd $(VENV_DIR)/bin && \
-		ln -sf bzip2 bunzip2 && \
-		ln -sf bzip2 bzcat
+		make CFLAGS="-Wall -Winline -O2 -g -fPIC" LDFLAGS="-fPIC" && \
+		make install PREFIX=$(VENV_DIR)
 	@touch $@
 
 # Special case for Tcl/Tk
@@ -225,15 +227,15 @@ $(VENV_DIR)/.readline.done: $(SOURCES_DIR)/download.done $(VENV_DIR)/.ncurses.do
 # Python Build
 #-------------------------------------------------------------------------------
 
+# $(VENV_DIR)/.bzip2.done
+# $(VENV_DIR)/.sqlite.done
 $(VENV_DIR)/.python.done: $(VENV_DIR)/.libffi.done \
 	$(VENV_DIR)/.openssl.done \
-	$(VENV_DIR)/.sqlite.done \
 	$(VENV_DIR)/.ncurses.done \
 	$(VENV_DIR)/.gdbm.done \
 	$(VENV_DIR)/.tcl.done \
 	$(VENV_DIR)/.tk.done \
-	$(VENV_DIR)/.readline.done \
-	$(VENV_DIR)/.bzip2.done
+	$(VENV_DIR)/.readline.done 
 	@echo "Building Python $(PYTHON_VERSION)..."
 	@mkdir -p $(BUILD_DIR)/python
 	@tar -xzf $(SOURCES_DIR)/$(PYTHON_TAR) -C $(BUILD_DIR)/python --strip-components=1
@@ -257,15 +259,13 @@ $(VENV_DIR)/.venv.done: $(VENV_DIR)/.python.done $(VENV_DIR)/.petsc.done
 	@$(VENV_DIR)/bin/pip3 install --upgrade pip setuptools wheel
 	@$(VENV_DIR)/bin/pip3 install -r requirements.txt
 	@$(VENV_DIR)/bin/pip3 install $(BUILD_DIR)/petsc/src/binding/petsc4py
-	@$(VENV_DIR)/bin/pip3 install -e src/
 	@ln -sf $(VENV_DIR)/bin/pip3 $(VENV_DIR)/bin/pip
 	@touch $@
 
 #------------------------------------------------------------------------------
 # Instalar PETSc y dependencias
 #------------------------------------------------------------------------------
-# $(VENV_DIR)/.petsc.done: $(VENV_DIR)/.openmpi.done
-$(VENV_DIR)/.petsc.done:
+$(VENV_DIR)/.petsc.done: $(SOURCES_DIR)/download.done $(VENV_DIR)/.openmpi.done
 	@echo "Instalando PETSc..."
 	@mkdir -p $(BUILD_DIR)/petsc
 	@tar -xzf $(SOURCES_DIR)/$(PETSC_TAR) -C $(BUILD_DIR)/petsc --strip-components=1
@@ -282,7 +282,6 @@ $(VENV_DIR)/.petsc.done:
 			--download-hypre \
 			--download-metis \
 			--download-mumps \
-			--download-openmpi \
 			--download-parmetis \
 			--download-ptscotch \
 			--download-slepc \
@@ -298,29 +297,35 @@ $(VENV_DIR)/.petsc.done:
 #------------------------------------------------------------------------------
 # Instalar dependencias y preCICE
 #------------------------------------------------------------------------------
-$(VENV_DIR)/.precice-deps.done:
-	@echo "Instalando dependencias de preCICE..."
+$(VENV_DIR)/.eigen.done:
+	@echo "Instalando Eigen..."
+	@tar -xzf $(SOURCES_DIR)/$(EIGEN_TAR) -C $(VENV_DIR)/include/
+	@mv $(VENV_DIR)/include/eigen-$(EIGEN_VERSION) $(VENV_DIR)/include/eigen
+	@touch $@
 
-	# Instalar Eigen
-	@tar -xzf $(SOURCES_DIR)/eigen-3.3.7.tar.gz -C $(VENV_DIR)/include/
-	@mv $(VENV_DIR)/include/eigen-3.3.7 $(VENV_DIR)/include/eigen
-
-	# Instalar Boost
+$(VENV_DIR)/.boost.done:
+	@echo "Instalando Boost..."
 	@mkdir -p $(BUILD_DIR)/boost
-	@tar -xzf $(SOURCES_DIR)/boost_1_87_0.tar.gz -C $(BUILD_DIR)/boost --strip-components=1
+	@tar -xzf $(SOURCES_DIR)/$(BOOST_TAR) -C $(BUILD_DIR)/boost --strip-components=1
 	@cd $(BUILD_DIR)/boost && \
-		./bootstrap.sh --prefix=$(VENV_DIR) ./bootstrap.sh --with-libraries=log,thread,system,filesystem,program_options,test && \
-		./b2 -a --prefix=$(VENV_DIR) install 
+		./bootstrap.sh --prefix=$(VENV_DIR) --with-libraries=log,thread,system,filesystem,program_options,test && \
+		./b2 --prefix=$(VENV_DIR) install 
+	@touch $@
 
-	# Instalar libxml2
+$(VENV_DIR)/.libxml2.done:
+	@echo "Instalando libxml2..."
 	@mkdir -p $(BUILD_DIR)/libxml2
-	@tar -xf $(SOURCES_DIR)/libxml2-2.9.12.tar.xz -C $(BUILD_DIR)/libxml2 --strip-components=1
+	@tar -xf $(SOURCES_DIR)/$(LIBXML2_TAR) -C $(BUILD_DIR)/libxml2 --strip-components=1
 	@cd $(BUILD_DIR)/libxml2 && \
+		./autogen.sh && \
 		./configure --prefix=$(VENV_DIR) --without-python && \
 		make -j$(NPROC) && make install
 	@touch $@
 
-$(VENV_DIR)/.precice.done: $(VENV_DIR)/.petsc.done $(VENV_DIR)/.precice-deps.done
+$(VENV_DIR)/.precice.done: $(VENV_DIR)/.petsc.done \
+	$(VENV_DIR)/.libxml2.done \
+	$(VENV_DIR)/.eigen.done \
+	$(VENV_DIR)/.boost.done
 	@echo "Instalando preCICE..."
 	@mkdir -p $(BUILD_DIR)/precice
 	@tar -xf $(SOURCES_DIR)/$(PRECICE_TAR) -C $(BUILD_DIR)/precice --strip-components=1
@@ -328,7 +333,9 @@ $(VENV_DIR)/.precice.done: $(VENV_DIR)/.petsc.done $(VENV_DIR)/.precice-deps.don
 		cmake --preset=production \
 			-DCMAKE_BUILD_TYPE=Release \
 			-DPYTHON_EXECUTABLE=$(VENV_DIR)/bin/python \
-			-DCMAKE_PREFIX_PATH=$(VENV_DIR) \
+			-DCMAKE_INSTALL_PREFIX=$(VENV_DIR) \
+			-DPRECICE_InstallTest=ON \
+			-DPRECICE_CONFIGURE_PACKAGE_GENERATION=OFF \
 			-DMPI_C_COMPILER=$(VENV_DIR)/bin/mpicc \
 			-DMPI_CXX_COMPILER=$(VENV_DIR)/bin/mpicxx \
 			-DEIGEN3_INCLUDE_DIR=$(VENV_DIR)/include/eigen
