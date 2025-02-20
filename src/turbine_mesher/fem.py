@@ -8,6 +8,7 @@ from petsc4py import PETSc
 from slepc4py import SLEPc
 
 from .elements import (
+    MITC4,
     LagrangeElement,
     QuadElement,
     SerendipityElement,
@@ -25,31 +26,34 @@ ELEMENTS_MAP_2D = {
     9: LagrangeElement,
 }
 
+ELEMENTS_MAP_SHELL = {
+    4: MITC4,
+}
+
 
 class FEA(ABC):
-    def __init__(self, mesh, E: float, nu: float, rho: float = 1):
+    def __init__(self, mesh, E: float, nu: float, rho: float = 1, use_shell_element: bool = False):
         self.mesh = mesh
         self.dim = self.mesh.dim
-        self.ndof = self.dim * self.mesh.num_nodes
+        self.dim = 3 if use_shell_element else 2
+        self.ndof = self.mesh.num_nodes * (6 if use_shell_element else 2)
         self.E = E
         self.nu = nu
         self.rho = rho
+        self.use_shell_element = use_shell_element
         self._u = np.array([])
         self._K = np.array([])
         self._M = np.array([])
         self._f = np.array([])
 
         self.global_dof_map = {}
-        for element_id, element in mesh.elements_map.items():
-            nodes = np.array(element)
-            element_type = ELEMENTS_MAP_2D[len(element)]
-            global_dofs = np.empty(element_type.dofs_per_node * len(nodes))  # Asegurar enteros
-            global_dofs = global_dofs.astype(np.int32)
-            for i in range(element_type.dofs_per_node):
-                global_dofs[i :: element_type.dofs_per_node] = (
-                    element_type.dofs_per_node * nodes + i
-                )
-            self.global_dof_map[element_id] = global_dofs
+        for element_id, nodes in mesh.elements_map.items():
+            num_nodes = len(nodes)
+            element_type = (ELEMENTS_MAP_SHELL if use_shell_element else ELEMENTS_MAP_2D)[num_nodes]
+            dofs = element_type.dofs_per_node
+            base_indices = np.array(nodes, dtype=np.int32) * dofs
+            global_dofs = (base_indices[:, None] + np.arange(dofs)).flatten()
+            self.global_dof_map[element_id] = global_dofs.astype(np.int32)
 
     @property
     def u(self) -> np.ndarray:
@@ -126,8 +130,15 @@ class FEA(ABC):
     def write_results(self, output_file: str):
         """Escribe los resultados en un archivo VTK."""
         points = self.mesh.nodes
-        U = self.u.reshape(-1, self.dim)
-        F = self.f.reshape(-1, self.dim)
+        if self.use_shell_element:
+            U = self.u.reshape(-1, 6)
+            U_disp = U[:, :3]
+            U_rot = U[:, 3:]
+            point_data = {"Displacement": U_disp, "Rotation": U_rot}
+        else:
+            U = self.u.reshape(-1, 2)
+            U = np.hstack((self.u.reshape(-1, 2), np.zeros((self.u.shape[0] // 2, 1))))
+            point_data = {"Displacement": U}
 
         cells = []
         for element_kind, labels in self.mesh.elements_class.items():
@@ -139,14 +150,13 @@ class FEA(ABC):
                     )
                 )
 
-        point_data = {"U": U, "F": F}
         mesh_object = meshio.Mesh(points, cells, point_data=point_data)
         mesh_object.write(output_file, file_format="vtk")
 
 
 class FemModel(FEA):
-    def __init__(self, mesh, E: float, nu: float, rho: float = 1):
-        super().__init__(mesh, E, nu, rho)
+    def __init__(self, mesh, E: float, nu: float, rho: float = 1, use_shell_element: bool = False):
+        super().__init__(mesh, E, nu, rho, use_shell_element)
         self._K = np.zeros((self.ndof, self.ndof))
         self._M = np.zeros((self.ndof, self.ndof))
         self._f = np.zeros((self.mesh.num_nodes, self.dim))
@@ -161,8 +171,12 @@ class FemModel(FEA):
         for element_id, element in self.mesh.elements_map.items():
             coords = self.mesh.nodes[element]
             num_nodes = len(element)
-            element_type = ELEMENTS_MAP_2D[num_nodes]
-            el = element_type(coords, self.E, self.nu, self.rho)
+            if self.use_shell_element:
+                element_type = ELEMENTS_MAP_SHELL[num_nodes]
+                el = element_type(coords, self.E, self.nu, self.rho, h=0.1)
+            else:
+                element_type = ELEMENTS_MAP_2D[num_nodes]
+                el = element_type(coords, self.E, self.nu, self.rho)
 
             if property == "K":
                 P = el.Ke
@@ -193,9 +207,14 @@ class FemModel(FEA):
         for element_id, element in self.mesh.elements_map.items():
             # Se omiten los índices -1 si existen
             coords = self.mesh.nodes[element]
+            num_nodes = len(element)
+            if self.use_shell_element:
+                element_type = ELEMENTS_MAP_SHELL[num_nodes]
+                el = element_type(coords, self.E, self.nu, self.rho, h=0.1)
+            else:
+                element_type = ELEMENTS_MAP_2D[num_nodes]
+                el = element_type(coords, self.E, self.nu, self.rho)
 
-            element_type = ELEMENTS_MAP_2D[len(element)]
-            el = element_type(coords, self.E, self.nu)
             Fe = el.load_vector(f_vec).astype(np.float32)
 
             global_dofs = self.global_dof_map[element_id]
@@ -289,7 +308,7 @@ class FemModelPETSc(FEA):
         - \\(\\Omega\\) is the element domain.
     """
 
-    def __init__(self, mesh, E: float, nu: float, rho: float = 1):
+    def __init__(self, mesh, E: float, nu: float, rho: float = 1, use_shell_element: bool = False):
         """
         Initialize the FEM model with the provided mesh and material properties.
 
@@ -304,7 +323,7 @@ class FemModelPETSc(FEA):
         rho : float
             Material density.
         """
-        super().__init__(mesh, E, nu, rho)
+        super().__init__(mesh, E, nu, rho, use_shell_element)
 
         self.dim = 2
 
@@ -320,7 +339,11 @@ class FemModelPETSc(FEA):
         """Calcula número de no-ceros por fila basado en conectividad de la malla."""
         adjacency = [set() for _ in range(self.ndof)]
         for element in self.mesh.elements:
-            element_type = ELEMENTS_MAP_2D[len(element)]
+            num_nodes = len(element)
+            if self.use_shell_element:
+                element_type = ELEMENTS_MAP_SHELL[num_nodes]
+            else:
+                element_type = ELEMENTS_MAP_2D[num_nodes]
             dofs = [element_type.dofs_per_node * node + i for node in element for i in (0, 1)]
             for i in dofs:
                 adjacency[i].update(dofs)
@@ -356,9 +379,13 @@ class FemModelPETSc(FEA):
         matrix = self._create_matrix()
         for element_id, element in self.mesh.elements_map.items():
             coords = self.mesh.nodes[element]
-
-            element_type = ELEMENTS_MAP_2D[len(element)]
-            el = element_type(coords, self.E, self.nu, self.rho)
+            num_nodes = len(element)
+            if self.use_shell_element:
+                element_type = ELEMENTS_MAP_SHELL[num_nodes]
+                el = element_type(coords, self.E, self.nu, self.rho, h=0.1)
+            else:
+                element_type = ELEMENTS_MAP_2D[num_nodes]
+                el = element_type(coords, self.E, self.nu, self.rho)
             if property == "K":
                 P = el.Ke
             if property == "M":
@@ -397,9 +424,13 @@ class FemModelPETSc(FEA):
         f_global = PETSc.Vec().createWithArray(np.zeros(self.ndof))
         for element_id, element in self.mesh.elements_map.items():
             coords = self.mesh.nodes[element]
-
-            element_type = ELEMENTS_MAP_2D[len(element)]
-            el = element_type(coords, self.E, self.nu)
+            num_nodes = len(element)
+            if self.use_shell_element:
+                element_type = ELEMENTS_MAP_SHELL[num_nodes]
+                el = element_type(coords, self.E, self.nu, self.rho, h=0.1)
+            else:
+                element_type = ELEMENTS_MAP_2D[num_nodes]
+                el = element_type(coords, self.E, self.nu, self.rho)
             Fe = el.load_vector(f_vec).astype(np.float32)
 
             global_dofs = self.global_dof_map[element_id]
