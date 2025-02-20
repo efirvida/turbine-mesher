@@ -34,11 +34,11 @@ class TriElement(Element2D):
 
     @property
     def integration_points(self):
-        if self._integration_points == 1:
+        if self._gauss_order == 1:
             # Regla de 1 punto (exacta para polinomios de orden ≤ 1)
             return ([(1 / 3, 1 / 3)], [0.5])
 
-        elif self._integration_points == 3:
+        elif self._gauss_order == 3:
             # Regla de 3 puntos (exacta para polinomios de orden ≤ 2)
             return (
                 [
@@ -49,7 +49,7 @@ class TriElement(Element2D):
                 [1 / 6, 1 / 6, 1 / 6],
             )
 
-        elif self._integration_points == 4:
+        elif self._gauss_order == 4:
             # Regla de 4 puntos (exacta para polinomios de orden ≤ 3)
             return (
                 [
@@ -61,7 +61,7 @@ class TriElement(Element2D):
                 [-27 / 96, 25 / 96, 25 / 96, 25 / 96],
             )  # Dunavant de 4 puntos
 
-        elif self._integration_points == 7:
+        elif self._gauss_order == 7:
             # Regla de 7 puntos (exacta para polinomios de orden ≤ 5)
             return (
                 [
@@ -86,7 +86,7 @@ class TriElement(Element2D):
 
         else:
             raise NotImplementedError(
-                f"Integration rule for {self._integration_points} points is not implemented."
+                f"Integration rule for {self._gauss_order} points is not implemented."
             )
 
     @property
@@ -107,7 +107,7 @@ class TriQuadElement(TriElement):
         Initialize the linear triangular element with nodal coordinates.
         """
         super().__init__(coords, E, nu, density)
-        self._integration_points = 7
+        self._gauss_order = 7
 
     def shape_functions(self, xi: float, eta: float) -> np.ndarray:
         N1 = (1 - xi - eta) * (1 - 2 * xi - 2 * eta)
