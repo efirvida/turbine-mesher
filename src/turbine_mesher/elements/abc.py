@@ -59,10 +59,9 @@ class Element2D(ABC):
         self.E = E
         self.nu = nu
         self.rho = rho
-        self._K = np.zeros((self.dofs, self.dofs))
-        self._M = np.zeros((self.dofs, self.dofs))
-        self._f = np.zeros(self.dofs)
         self._gauss_order = 1  # Number of Gauss integration points
+
+        self.__integration_points_cache = None
 
     @property
     def dofs(self) -> int:
@@ -91,7 +90,9 @@ class Element2D(ABC):
                 - points: an array of integration points,
                 - weights: an array of corresponding weights.
         """
-        return gauss_legendre_quadrature(self._gauss_order)
+        if self.__integration_points_cache is None:
+            self.__integration_points_cache = gauss_legendre_quadrature(self._gauss_order)
+        return self.__integration_points_cache
 
     @property
     def C(self) -> np.ndarray:
@@ -148,6 +149,7 @@ class Element2D(ABC):
             Element stiffness matrix of shape (dofs x dofs).
         """
         points, weights = self.integration_points
+        K = np.zeros((self.dofs, self.dofs))
 
         for (xi, eta), w in zip(points, weights):
             dN_dxi, dN_deta = self.shape_function_derivatives(xi, eta)
@@ -161,9 +163,9 @@ class Element2D(ABC):
             B[2, 0::2] = dN_dy  # γ_xy
             B[2, 1::2] = dN_dx  # γ_xy
 
-            self._K += (B.T @ self.C @ B) * det_J * w
+            K += (B.T @ self.C @ B) * det_J * w
 
-        return self._K
+        return K
 
     @property
     def Me(self) -> np.ndarray:
@@ -186,6 +188,7 @@ class Element2D(ABC):
             Element mass matrix of shape (dofs x dofs).
         """
         points, weights = self.integration_points
+        M = np.zeros((self.dofs, self.dofs))
         for (xi, eta), w in zip(points, weights):
             _, det_J, _ = self._compute_jacobian(xi, eta)
             N_values = self.shape_functions(xi, eta)  # Array of shape (n_nodes,)
@@ -194,9 +197,9 @@ class Element2D(ABC):
             N_matrix[0, 0::2] = N_values
             N_matrix[1, 1::2] = N_values
 
-            self._M += self.rho * (N_matrix.T @ N_matrix) * det_J * w
+            M += self.rho * (N_matrix.T @ N_matrix) * det_J * w
 
-        return self._M
+        return M
 
     @property
     def element_type(self) -> str:
@@ -234,14 +237,15 @@ class Element2D(ABC):
             Element load vector of shape (dofs,).
         """
         points, weights = self.integration_points
+        f = np.zeros(self.dofs)
         for (xi, eta), w in zip(points, weights):
             _, det_J, _ = self._compute_jacobian(xi, eta)
             N_values = self.shape_functions(xi, eta)
             N_matrix = np.zeros((2, self.dofs))
             N_matrix[0, 0::2] = N_values
             N_matrix[1, 1::2] = N_values
-            self._f += (N_matrix.T @ body_force) * det_J * w
-        return self._f
+            f += (N_matrix.T @ body_force) * det_J * w
+        return f
 
     def plot_element(self):
         """
